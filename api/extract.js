@@ -1,13 +1,22 @@
 import { GoogleGenAI } from "@google/genai";
 
-const DEFAULT_MODEL = "gemini-2.5-flash";
+// Thứ tự thử model: nếu model đầu lỗi 404 thì thử model tiếp theo
+const FALLBACK_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+];
+
+function getModelList() {
+  const env = (process.env.GEMINI_MODEL || "").trim();
+  const list = env ? [env, ...FALLBACK_MODELS] : [...FALLBACK_MODELS];
+  return [...new Set(list)];
+}
 
 function parseBase64Image(raw) {
   if (typeof raw !== "string" || !raw.trim()) return null;
   const match = raw.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-  if (match) {
-    return { mimeType: match[1], data: match[2] };
-  }
+  if (match) return { mimeType: match[1], data: match[2] };
   return { mimeType: "image/jpeg", data: raw.trim() };
 }
 
@@ -23,7 +32,6 @@ function extractFirstJsonBlock(text) {
   let depth = 0;
   let inString = false;
   let escape = false;
-
   for (let i = start; i < cleaned.length; i++) {
     const ch = cleaned[i];
     if (escape) {
@@ -39,14 +47,10 @@ function extractFirstJsonBlock(text) {
       continue;
     }
     if (inString) continue;
-
-    if (ch === "{") {
-      depth++;
-    } else if (ch === "}") {
+    if (ch === "{") depth++;
+    else if (ch === "}") {
       depth--;
-      if (depth === 0) {
-        return cleaned.slice(start, i + 1);
-      }
+      if (depth === 0) return cleaned.slice(start, i + 1);
     }
   }
   return null;
@@ -54,16 +58,10 @@ function extractFirstJsonBlock(text) {
 
 function getResponseText(response) {
   if (!response) return "";
-  if (typeof response.text === "function") {
-    return response.text() || "";
-  }
-  if (typeof response.text === "string") {
-    return response.text;
-  }
+  if (typeof response.text === "function") return response.text() || "";
+  if (typeof response.text === "string") return response.text;
   const parts = response?.candidates?.[0]?.content?.parts;
-  if (Array.isArray(parts)) {
-    return parts.map((p) => p?.text || "").join("");
-  }
+  if (Array.isArray(parts)) return parts.map((p) => p?.text || "").join("");
   return "";
 }
 
@@ -78,16 +76,8 @@ function buildPrompt({ text, subject, format, mode, counts, imageCount }) {
   return [
     "Bạn là chuyên gia ra đề và bóc tách đề thi THPT Việt Nam.",
     `Môn học: ${safeSubject}.`,
-    `Chế độ: ${
-      safeMode === "gen"
-        ? "Tạo đề mới dựa trên tài liệu/chủ đề đầu vào"
-        : "Tách đề có sẵn từ ảnh/văn bản đầu vào"
-    }.`,
-    `Định dạng: ${
-      safeFormat === "short"
-        ? "Trắc nghiệm ngắn"
-        : "Cấu trúc đề THPT (mcq, tf, short)"
-    }.`,
+    `Chế độ: ${safeMode === "gen" ? "Tạo đề mới dựa trên tài liệu/chủ đề đầu vào" : "Tách đề có sẵn từ ảnh/văn bản đầu vào"}.`,
+    `Định dạng: ${safeFormat === "short" ? "Trắc nghiệm ngắn" : "Cấu trúc đề THPT (mcq, tf, short)"}.`,
     imageCount > 0
       ? `Số trang ảnh đính kèm: ${imageCount} (đánh số trang từ 0 đến ${imageCount - 1}).`
       : "Không có ảnh đính kèm.",
@@ -141,6 +131,12 @@ function buildPrompt({ text, subject, format, mode, counts, imageCount }) {
     .join("\n\n");
 }
 
+function isModelNotFound(err) {
+  const status = err?.status ?? err?.code;
+  const msg = String(err?.message || "");
+  return status === 404 || /not found|not supported|NOT_FOUND/i.test(msg);
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "method_not_allowed" });
@@ -153,9 +149,6 @@ export default async function handler(req, res) {
       hint: "Chưa đặt GEMINI_API_KEY trên Vercel (Settings → Environment Variables), rồi Redeploy.",
     });
   }
-
-  const model =
-    (process.env.GEMINI_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
 
   let body = req.body;
   if (typeof body === "string") {
@@ -176,12 +169,13 @@ export default async function handler(req, res) {
     body.counts && typeof body.counts === "object" ? body.counts : {};
 
   const parsedImages = images.map(parseBase64Image).filter(Boolean);
-
   if (parsedImages.length === 0 && !text.trim()) {
-    return res.status(400).json({
-      error: "empty_input",
-      hint: "Không có ảnh hoặc văn bản nào được gửi lên.",
-    });
+    return res
+      .status(400)
+      .json({
+        error: "empty_input",
+        hint: "Không có ảnh hoặc văn bản nào được gửi lên.",
+      });
   }
 
   const prompt = buildPrompt({
@@ -192,50 +186,58 @@ export default async function handler(req, res) {
     counts,
     imageCount: parsedImages.length,
   });
-
-  const parts = [];
-  for (const img of parsedImages) {
-    parts.push({
-      inlineData: {
-        mimeType: img.mimeType,
-        data: img.data,
-      },
-    });
-  }
+  const parts = parsedImages.map((img) => ({
+    inlineData: { mimeType: img.mimeType, data: img.data },
+  }));
   parts.push({ text: prompt });
 
+  const ai = new GoogleGenAI({ apiKey });
+  const tried = [];
+  let lastErr = null;
   let rawText = "";
-  try {
-    const ai = new GoogleGenAI({ apiKey });
-    const response = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts }],
-      config: {
-        responseMimeType: "application/json",
-        temperature: 0.2,
-      },
-    });
-    rawText = getResponseText(response);
-  } catch (err) {
-    console.error("[extract] Gemini request failed:", err);
+  let usedModel = "";
+
+  for (const model of getModelList()) {
+    tried.push(model);
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: [{ role: "user", parts }],
+        config: { responseMimeType: "application/json", temperature: 0.2 },
+      });
+      rawText = getResponseText(response);
+      usedModel = model;
+      break;
+    } catch (err) {
+      lastErr = err;
+      console.error(
+        `[extract] model ${model} failed:`,
+        err?.status,
+        err?.message,
+      );
+      if (!isModelNotFound(err)) break; // lỗi khác (khóa sai, quota...) thì dừng ngay
+    }
+  }
+
+  if (!usedModel) {
     return res.status(500).json({
       error: "gemini_request_failed",
-      message: err?.message || "Unknown error",
-      model,
-      hint: "Kiểm tra GEMINI_API_KEY còn hiệu lực và GEMINI_MODEL là tên model hợp lệ (ví dụ gemini-2.5-flash).",
+      message: lastErr?.message || "Unknown error",
+      tried,
+      hint: "Model không khả dụng với khóa này. Vào Google AI Studio kiểm tra khóa và model, rồi cập nhật GEMINI_MODEL trên Vercel.",
     });
   }
 
   const jsonBlock = extractFirstJsonBlock(rawText);
   if (!jsonBlock) {
-    console.error(
-      "[extract] No JSON found. Raw text head:",
-      rawText.slice(0, 300),
-    );
-    return res.status(422).json({
-      error: "invalid_json",
-      hint: "AI trả về không có khối JSON. Thử lại với ít trang hơn.",
-    });
+    console.error("[extract] No JSON. Head:", rawText.slice(0, 300));
+    return res
+      .status(422)
+      .json({
+        error: "invalid_json",
+        model: usedModel,
+        hint: "AI không trả về JSON. Thử lại với ít trang hơn.",
+      });
   }
 
   let parsedExam;
@@ -243,15 +245,18 @@ export default async function handler(req, res) {
     parsedExam = JSON.parse(jsonBlock);
   } catch (err) {
     console.error("[extract] JSON parse failed:", err?.message);
-    return res.status(422).json({
-      error: "invalid_json",
-      hint: "JSON từ AI bị lỗi cú pháp. Thử lại hoặc giảm số trang.",
-    });
+    return res
+      .status(422)
+      .json({
+        error: "invalid_json",
+        model: usedModel,
+        hint: "JSON từ AI lỗi cú pháp. Thử lại.",
+      });
   }
 
   if (!parsedExam || typeof parsedExam !== "object") {
-    return res.status(422).json({ error: "invalid_json" });
+    return res.status(422).json({ error: "invalid_json", model: usedModel });
   }
 
-  return res.status(200).json(parsedExam);
+  return res.status(200).json({ ...parsedExam, _model: usedModel });
 }
