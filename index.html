@@ -1,405 +1,158 @@
-<!doctype html>
-<html lang="vi">
-  <head>
-    <meta charset="utf-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
-    />
-    <title>LuyệnĐề THPT</title>
-    <link rel="stylesheet" href="style.css" />
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script>
-      window.pdfjsLib = window.pdfjsLib || window["pdfjs-dist/build/pdf"];
-      if (window.pdfjsLib) {
-        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-          "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-      }
-    </script>
-    <script>
-      window.MathJax = {
-        tex: {
-          inlineMath: [
-            ["$", "$"],
-            ["\\(", "\\)"],
-          ],
-          displayMath: [["$$", "$$"]],
-        },
-        svg: {
-          fontCache: "global",
-        },
-      };
-    </script>
-    <script
-      id="MathJax-script"
-      async
-      src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"
-    ></script>
-  </head>
-  <body data-layout="auto">
-    <header class="app-header">
-      <div class="header-left">
-        <a href="#" id="logo-btn" class="logo">LuyệnĐề THPT</a>
-      </div>
-      <div class="header-right">
-        <div class="layout-switcher" role="group" aria-label="Chế độ giao diện">
-          <button
-            type="button"
-            id="layout-auto"
-            class="layout-btn active"
-            data-mode="auto"
-          >
-            Tự động
-          </button>
-          <button
-            type="button"
-            id="layout-mobile"
-            class="layout-btn"
-            data-mode="mobile"
-          >
-            Điện thoại
-          </button>
-          <button
-            type="button"
-            id="layout-desktop"
-            class="layout-btn"
-            data-mode="desktop"
-          >
-            Máy tính
-          </button>
+<div class="config-box">
+      <div class="config-grid">
+        <div class="config-item">
+          <label for="subject-select" class="field-label">Môn học</label>
+          <select id="subject-select" class="select-input">
+            <option value="toan">Toán học</option>
+            <option value="ly">Vật lí</option>
+            <option value="hoa">Hóa học</option>
+            <option value="sinh">Sinh học</option>
+            <option value="su">Lịch sử</option>
+            <option value="dia">Địa lí</option>
+            <option value="gdktpl">GD Kinh tế & Pháp luật</option>
+            <option value="anh">Tiếng Anh</option>
+            <option value="tin">Tin học</option>
+            <option value="congnghe">Công nghệ</option>
+          </select>
         </div>
-        <div id="user-area" class="user-area">
-          <span id="quota-badge" class="quota-badge">Lượt tạo: --/--</span>
-          <button type="button" id="auth-btn" class="btn btn-secondary">
-            Đăng nhập
-          </button>
+
+        <div class="config-item">
+          <span class="field-label">Chế độ xử lý</span>
+          <div class="radio-group" id="mode-group">
+            <label class="radio-card">
+              <input type="radio" name="process-mode" value="extract" checked>
+              <span>Tách đề có sẵn</span>
+            </label>
+            <label class="radio-card">
+              <input type="radio" name="process-mode" value="generate">
+              <span>Tạo đề mới</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="config-item">
+          <span class="field-label">Cấu trúc đề</span>
+          <div class="radio-group" id="format-group">
+            <label class="radio-card">
+              <input type="radio" name="exam-format" value="thpt" checked>
+              <span>Dạng đề THPT (3 phần)</span>
+            </label>
+            <label class="radio-card">
+              <input type="radio" name="exam-format" value="short-mcq">
+              <span>Trắc nghiệm ngắn</span>
+            </label>
+          </div>
         </div>
       </div>
-    </header>
 
-    <main class="app-main">
-      <!-- Khu vực Trang chủ: Tải tài liệu & Cấu hình đề -->
-      <section id="home-view" class="view-section active">
-        <div class="setup-container">
-          <div class="upload-box">
-            <div class="upload-actions">
-              <label for="file-input" class="btn btn-outline">
-                Chọn PDF hoặc Ảnh
-                <input
-                  type="file"
-                  id="file-input"
-                  accept="application/pdf,image/*"
-                  multiple
-                  hidden
-                />
-              </label>
-              <label for="camera-input" class="btn btn-outline">
-                Chụp ảnh đề
-                <input
-                  type="file"
-                  id="camera-input"
-                  accept="image/*"
-                  capture="environment"
-                  hidden
-                />
-              </label>
-            </div>
-            <div class="paste-box">
-              <label for="text-input" class="field-label"
-                >Hoặc dán nội dung văn bản đề / bài tập:</label
-              >
-              <textarea
-                id="text-input"
-                class="text-input"
-                rows="5"
-                placeholder="Dán câu hỏi, đoạn văn bản hoặc đề cương vào đây..."
-              ></textarea>
-            </div>
-          </div>
+      <div class="action-bar">
+        <button type="button" id="create-exam-btn" class="btn btn-primary">Tạo đề</button>
+      </div>
+    </div>
+  </div>
 
-          <div class="config-box">
-            <div class="config-grid">
-              <div class="config-item">
-                <label for="subject-select" class="field-label">Môn học</label>
-                <select id="subject-select" class="select-input">
-                  <option value="toan">Toán học</option>
-                  <option value="ly">Vật lí</option>
-                  <option value="hoa">Hóa học</option>
-                  <option value="sinh">Sinh học</option>
-                  <option value="su">Lịch sử</option>
-                  <option value="dia">Địa lí</option>
-                  <option value="gdktpl">GD Kinh tế & Pháp luật</option>
-                  <option value="anh">Tiếng Anh</option>
-                  <option value="tin">Tin học</option>
-                  <option value="congnghe">Công nghệ</option>
-                </select>
-              </div>
+  <!-- Khu vực lưới ảnh trang đã tách từ PDF / Ảnh chụp -->
+  <section id="page-grid-section" class="page-grid-section hidden">
+    <div class="page-grid-header">
+      <h2 class="section-title">Chọn các trang cần xử lý</h2>
+      <div class="page-grid-controls">
+        <button type="button" id="select-all-pages-btn" class="btn btn-sm">Chọn tất cả</button>
+        <button type="button" id="deselect-all-pages-btn" class="btn btn-sm">Bỏ chọn</button>
+        <button type="button" id="clear-files-btn" class="btn btn-sm btn-danger">Xóa tài liệu</button>
+      </div>
+    </div>
+    <div id="page-grid" class="page-grid"></div>
+  </section>
+</section>
 
-              <div class="config-item">
-                <span class="field-label">Chế độ xử lý</span>
-                <div class="radio-group" id="mode-group">
-                  <label class="radio-card">
-                    <input
-                      type="radio"
-                      name="process-mode"
-                      value="extract"
-                      checked
-                    />
-                    <span>Tách đề có sẵn</span>
-                  </label>
-                  <label class="radio-card">
-                    <input type="radio" name="process-mode" value="generate" />
-                    <span>Tạo đề mới</span>
-                  </label>
-                </div>
-              </div>
+<!-- Khu vực Làm bài & Chữa bài -->
+<section id="exam-view" class="view-section hidden">
+  <div class="exam-topbar">
+    <div class="exam-nav-info">
+      <button type="button" id="back-home-btn" class="btn btn-sm">← Trang chủ</button>
+      <span id="exam-title" class="exam-title">Đề luyện tập</span>
+      <span id="save-status" class="save-status">Đã lưu tự động</span>
+    </div>
+    <div id="question-nav-bar" class="question-nav-bar" aria-label="Danh sách câu hỏi"></div>
+    <div class="exam-topbar-actions">
+      <button type="button" id="share-exam-btn" class="btn btn-sm btn-outline">Chia sẻ đề</button>
+      <button type="button" id="submit-exam-btn" class="btn btn-sm btn-primary">Nộp bài</button>
+    </div>
+  </div>
 
-              <div class="config-item">
-                <span class="field-label">Cấu trúc đề</span>
-                <div class="radio-group" id="format-group">
-                  <label class="radio-card">
-                    <input
-                      type="radio"
-                      name="exam-format"
-                      value="thpt"
-                      checked
-                    />
-                    <span>Dạng đề THPT (3 phần)</span>
-                  </label>
-                  <label class="radio-card">
-                    <input type="radio" name="exam-format" value="short-mcq" />
-                    <span>Trắc nghiệm ngắn</span>
-                  </label>
-                </div>
-              </div>
-            </div>
+  <div id="exam-workspace" class="exam-workspace">
+    <!-- Ngăn trái: Đề bài, hình minh họa & chọn đáp án -->
+    <div id="left-pane" class="pane left-pane">
+      <div class="question-header">
+        <span id="question-part-badge" class="part-badge">Phần I</span>
+        <span id="question-number-label" class="question-number">Câu 1</span>
+      </div>
 
-            <div class="action-bar">
-              <button
-                type="button"
-                id="create-exam-btn"
-                class="btn btn-primary"
-              >
-                Tạo đề
-              </button>
-            </div>
-          </div>
-        </div>
+      <div id="question-content" class="question-content"></div>
 
-        <!-- Khu vực lưới ảnh trang đã tách từ PDF / Ảnh chụp -->
-        <section id="page-grid-section" class="page-grid-section hidden">
-          <div class="page-grid-header">
-            <h2 class="section-title">Chọn các trang cần xử lý</h2>
-            <div class="page-grid-controls">
-              <button
-                type="button"
-                id="select-all-pages-btn"
-                class="btn btn-sm"
-              >
-                Chọn tất cả
-              </button>
-              <button
-                type="button"
-                id="deselect-all-pages-btn"
-                class="btn btn-sm"
-              >
-                Bỏ chọn
-              </button>
-              <button
-                type="button"
-                id="clear-files-btn"
-                class="btn btn-sm btn-danger"
-              >
-                Xóa tài liệu
-              </button>
-            </div>
-          </div>
-          <div id="page-grid" class="page-grid"></div>
-        </section>
-      </section>
+      <div id="question-image-container" class="question-image-container hidden">
+        <img id="question-image" class="question-image" alt="Hình minh họa câu hỏi">
+      </div>
 
-      <!-- Khu vực Làm bài & Chữa bài -->
-      <section id="exam-view" class="view-section hidden">
-        <div class="exam-topbar">
-          <div class="exam-nav-info">
-            <button type="button" id="back-home-btn" class="btn btn-sm">
-              ← Trang chủ
-            </button>
-            <span id="exam-title" class="exam-title">Đề luyện tập</span>
-            <span id="save-status" class="save-status">Đã lưu tự động</span>
-          </div>
-          <div
-            id="question-nav-bar"
-            class="question-nav-bar"
-            aria-label="Danh sách câu hỏi"
-          ></div>
-          <div class="exam-topbar-actions">
-            <button
-              type="button"
-              id="share-exam-btn"
-              class="btn btn-sm btn-outline"
-            >
-              Chia sẻ đề
-            </button>
-            <button
-              type="button"
-              id="submit-exam-btn"
-              class="btn btn-sm btn-primary"
-            >
-              Nộp bài
-            </button>
-          </div>
-        </div>
+      <!-- Khu vực trả lời cho Phần I: Trắc nghiệm A-D -->
+      <div id="answer-mcq" class="answer-area hidden"></div>
 
-        <div id="exam-workspace" class="exam-workspace">
-          <!-- Ngăn trái: Đề bài, hình minh họa & chọn đáp án -->
-          <div id="left-pane" class="pane left-pane">
-            <div class="question-header">
-              <span id="question-part-badge" class="part-badge">Phần I</span>
-              <span id="question-number-label" class="question-number"
-                >Câu 1</span
-              >
-            </div>
+      <!-- Khu vực trả lời cho Phần II: Đúng/Sai 4 ý a-d -->
+      <div id="answer-tf" class="answer-area hidden"></div>
 
-            <div id="question-content" class="question-content"></div>
+      <!-- Khu vực trả lời cho Phần III: Trả lời ngắn -->
+      <div id="answer-short" class="answer-area hidden">
+        <label for="short-answer-input" class="field-label">Nhập đáp án của bạn:</label>
+        <input type="text" id="short-answer-input" class="short-answer-input" placeholder="Ví dụ: 12,5 hoặc -4">
+      </div>
 
-            <div
-              id="question-image-container"
-              class="question-image-container hidden"
-            >
-              <img
-                id="question-image"
-                class="question-image"
-                alt="Hình minh họa câu hỏi"
-              />
-            </div>
-
-            <!-- Khu vực trả lời cho Phần I: Trắc nghiệm A-D -->
-            <div id="answer-mcq" class="answer-area hidden"></div>
-
-            <!-- Khu vực trả lời cho Phần II: Đúng/Sai 4 ý a-d -->
-            <div id="answer-tf" class="answer-area hidden"></div>
-
-            <!-- Khu vực trả lời cho Phần III: Trả lời ngắn -->
-            <div id="answer-short" class="answer-area hidden">
-              <label for="short-answer-input" class="field-label"
-                >Nhập đáp án của bạn:</label
-              >
-              <input
-                type="text"
-                id="short-answer-input"
-                class="short-answer-input"
-                placeholder="Ví dụ: 12,5 hoặc -4"
-              />
-            </div>
-
-            <div class="question-footer-nav">
-              <button
-                type="button"
-                id="prev-question-btn"
-                class="btn btn-secondary"
-              >
-                Câu trước
-              </button>
-              <button
-                type="button"
-                id="next-question-btn"
-                class="btn btn-secondary"
-              >
-                Câu tiếp
-              </button>
-            </div>
-          </div>
-
-          <!-- Ngăn phải: Kết quả chấm, lời giải 2 tab & khung chat AI -->
-          <div id="right-pane" class="pane right-pane">
-            <div id="score-panel" class="score-panel hidden">
-              <div class="score-summary">
-                <span class="score-label">Tổng điểm:</span>
-                <strong id="total-score" class="total-score">0.00 / 10</strong>
-              </div>
-              <div
-                id="question-result-status"
-                class="question-result-status"
-              ></div>
-            </div>
-
-            <div id="explanation-panel" class="explanation-panel">
-              <div class="explanation-tabs" role="tablist">
-                <button
-                  type="button"
-                  id="tab-essay"
-                  class="tab-btn active"
-                  role="tab"
-                  aria-selected="true"
-                  data-tab="essay"
-                >
-                  Tự luận
-                </button>
-                <button
-                  type="button"
-                  id="tab-quick"
-                  class="tab-btn"
-                  role="tab"
-                  aria-selected="false"
-                  data-tab="quick"
-                >
-                  Trắc nghiệm nhanh
-                </button>
-                <button
-                  type="button"
-                  id="explain-current-btn"
-                  class="btn btn-sm btn-outline"
-                >
-                  Xem lời giải câu này
-                </button>
-              </div>
-
-              <div id="explanation-body" class="explanation-body">
-                <div id="content-essay" class="tab-content active"></div>
-                <div id="content-quick" class="tab-content hidden">
-                  <div id="quick-warning" class="quick-warning hidden"></div>
-                  <div id="quick-detail" class="quick-detail"></div>
-                </div>
-              </div>
-            </div>
-
-            <div id="chat-panel" class="chat-panel">
-              <div class="chat-header">
-                <span>Hỏi thêm gia sư AI về câu này</span>
-              </div>
-              <div id="chat-messages" class="chat-messages"></div>
-              <form id="chat-form" class="chat-form">
-                <input
-                  type="text"
-                  id="chat-input"
-                  class="chat-input"
-                  placeholder="Hỏi cách biến đổi, bấm máy hoặc chỗ chưa hiểu..."
-                  autocomplete="off"
-                />
-                <button
-                  type="submit"
-                  id="chat-send-btn"
-                  class="btn btn-primary btn-sm"
-                >
-                  Gửi
-                </button>
-              </form>
-            </div>
-          </div>
-        </div>
-      </section>
-    </main>
-
-    <div id="loading-overlay" class="loading-overlay hidden" aria-live="polite">
-      <div class="loading-box">
-        <div class="spinner"></div>
-        <p id="loading-text" class="loading-text">Đang xử lý...</p>
+      <div class="question-footer-nav">
+        <button type="button" id="prev-question-btn" class="btn btn-secondary">Câu trước</button>
+        <button type="button" id="next-question-btn" class="btn btn-secondary">Câu tiếp</button>
       </div>
     </div>
 
-    <div id="toast-container" class="toast-container"></div>
+    <!-- Ngăn phải: Kết quả chấm, lời giải 2 tab & khung chat AI -->
+    <div id="right-pane" class="pane right-pane">
+      <div id="score-panel" class="score-panel hidden">
+        <div class="score-summary">
+          <span class="score-label">Tổng điểm:</span>
+          <strong id="total-score" class="total-score">0.00 / 10</strong>
+        </div>
+        <div id="question-result-status" class="question-result-status"></div>
+      </div>
 
-    <script type="module" src="app.js"></script>
-  </body>
-</html>
+      <div id="explanation-panel" class="explanation-panel">
+        <div class="explanation-tabs" role="tablist">
+          <button type="button" id="tab-essay" class="tab-btn active" role="tab" aria-selected="true" data-tab="essay">Tự luận</button>
+          <button type="button" id="tab-quick" class="tab-btn" role="tab" aria-selected="false" data-tab="quick">Trắc nghiệm nhanh</button>
+          <button type="button" id="explain-current-btn" class="btn btn-sm btn-outline">Xem lời giải câu này</button>
+        </div>
+
+        <div id="explanation-body" class="explanation-body">
+          <div id="content-essay" class="tab-content active"></div>
+          <div id="content-quick" class="tab-content hidden">
+            <div id="quick-warning" class="quick-warning hidden"></div>
+            <div id="quick-detail" class="quick-detail"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="chat-panel" class="chat-panel">
+        <div class="chat-header">
+          <span>Hỏi thêm gia sư AI về câu này</span>
+        </div>
+        <div id="chat-messages" class="chat-messages"></div>
+        <form id="chat-form" class="chat-form">
+          <input type="text" id="chat-input" class="chat-input" placeholder="Hỏi cách biến đổi, bấm máy hoặc chỗ chưa hiểu..." autocomplete="off">
+          <button type="submit" id="chat-send-btn" class="btn btn-primary btn-sm">Gửi</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="recent-section" class="recent-section hidden">
+  <h2 class="section-title">Bài gần đây</h2>
+  <div id="recent-list" class="recent-list"></div>
+</section>
