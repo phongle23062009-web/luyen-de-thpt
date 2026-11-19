@@ -1,11 +1,17 @@
 import { GoogleGenAI } from "@google/genai";
 
-// Thứ tự thử model: nếu model đầu lỗi 404 thì thử model tiếp theo
+// Model ưu tiên lấy từ GEMINI_MODEL, sau đó thử các model dự phòng này
 const FALLBACK_MODELS = [
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
   "gemini-flash-latest",
 ];
+
+// Số lần thử lại cho mỗi model khi bị quá tải (503, 429)
+const RETRIES_PER_MODEL = 2;
+
+// Thời gian tối đa cho mỗi lần gọi Gemini (ms), để trả lỗi rõ ràng trước khi Vercel cắt kết nối
+const CALL_TIMEOUT_MS = 45000;
 
 function getModelList() {
   const env = (process.env.GEMINI_MODEL || "").trim();
@@ -131,10 +137,65 @@ function buildPrompt({ text, subject, format, mode, counts, imageCount }) {
     .join("\n\n");
 }
 
+function errStatus(err) {
+  return err?.status ?? err?.code ?? err?.error?.code ?? null;
+}
+
+function errMessage(err) {
+  return String(err?.message || err?.error?.message || "");
+}
+
 function isModelNotFound(err) {
-  const status = err?.status ?? err?.code;
-  const msg = String(err?.message || "");
-  return status === 404 || /not found|not supported|NOT_FOUND/i.test(msg);
+  const status = errStatus(err);
+  return (
+    status === 404 || /not found|not supported|NOT_FOUND/i.test(errMessage(err))
+  );
+}
+
+function isRetryable(err) {
+  const status = errStatus(err);
+  return (
+    status === 503 ||
+    status === 429 ||
+    status === 500 ||
+    /high demand|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded/i.test(
+      errMessage(err),
+    )
+  );
+}
+
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const e = new Error(`Gemini không phản hồi sau ${ms / 1000} giây`);
+      e.code = 504;
+      reject(e);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function callWithRetry(ai, params) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= RETRIES_PER_MODEL; attempt++) {
+    try {
+      return await withTimeout(
+        ai.models.generateContent(params),
+        CALL_TIMEOUT_MS,
+      );
+    } catch (err) {
+      lastErr = err;
+      console.error(
+        `[extract] ${params.model} lần ${attempt + 1} lỗi:`,
+        errStatus(err),
+        errMessage(err).slice(0, 200),
+      );
+      if (!isRetryable(err) || attempt === RETRIES_PER_MODEL) throw err;
+      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+    }
+  }
+  throw lastErr;
 }
 
 export default async function handler(req, res) {
@@ -198,32 +259,37 @@ export default async function handler(req, res) {
   for (const model of getModelList()) {
     tried.push(model);
     try {
-      const response = await ai.models.generateContent({
+      const response = await callWithRetry(ai, {
         model,
         contents: [{ role: "user", parts }],
-        config: { responseMimeType: "application/json", temperature: 0.2 },
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.2,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
       });
       rawText = getResponseText(response);
       usedModel = model;
       break;
     } catch (err) {
       lastErr = err;
-      console.error(
-        `[extract] model ${model} failed:`,
-        err?.status,
-        err?.message,
-      );
-      if (!isModelNotFound(err)) break; // lỗi khác (khóa sai, quota...) thì dừng ngay
+      if (!isModelNotFound(err) && !isRetryable(err)) break;
     }
   }
 
   if (!usedModel) {
-    return res.status(500).json({
-      error: "gemini_request_failed",
-      message: lastErr?.message || "Unknown error",
-      tried,
-      hint: "Model không khả dụng với khóa này. Vào Google AI Studio kiểm tra khóa và model, rồi cập nhật GEMINI_MODEL trên Vercel.",
-    });
+    const status = errStatus(lastErr);
+    return res
+      .status(status === 503 || status === 429 || status === 504 ? 503 : 500)
+      .json({
+        error: "gemini_request_failed",
+        message: errMessage(lastErr) || "Unknown error",
+        tried,
+        hint:
+          status === 503 || /high demand|UNAVAILABLE/i.test(errMessage(lastErr))
+            ? "Google đang quá tải. Đợi vài phút rồi thử lại, hoặc giảm số trang."
+            : "Kiểm tra GEMINI_API_KEY và GEMINI_MODEL trên Vercel, rồi Redeploy.",
+      });
   }
 
   const jsonBlock = extractFirstJsonBlock(rawText);
