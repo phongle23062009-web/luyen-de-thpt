@@ -1,5 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 
+const DEFAULT_MODEL = "gemini-2.5-flash";
+
 function parseBase64Image(raw) {
   if (typeof raw !== "string" || !raw.trim()) return null;
   const match = raw.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
@@ -50,6 +52,21 @@ function extractFirstJsonBlock(text) {
   return null;
 }
 
+function getResponseText(response) {
+  if (!response) return "";
+  if (typeof response.text === "function") {
+    return response.text() || "";
+  }
+  if (typeof response.text === "string") {
+    return response.text;
+  }
+  const parts = response?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) {
+    return parts.map((p) => p?.text || "").join("");
+  }
+  return "";
+}
+
 function buildPrompt({ text, subject, format, mode, counts, imageCount }) {
   const safeSubject = subject || "Tổng hợp THPT";
   const safeFormat = format === "short" ? "short" : "thpt";
@@ -61,9 +78,19 @@ function buildPrompt({ text, subject, format, mode, counts, imageCount }) {
   return [
     "Bạn là chuyên gia ra đề và bóc tách đề thi THPT Việt Nam.",
     `Môn học: ${safeSubject}.`,
-    `Chế độ: ${safeMode === "gen" ? "Tạo đề mới dựa trên tài liệu/chủ đề đầu vào" : "Tách đề có sẵn từ ảnh/văn bản đầu vào"}.`,
-    `Định dạng: ${safeFormat === "short" ? "Trắc nghiệm ngắn" : "Cấu trúc đề THPT (mcq, tf, short)"}.`,
-    `Số trang ảnh đính kèm: ${imageCount} (đánh số trang từ 0 đến ${Math.max(0, imageCount - 1)}).`,
+    `Chế độ: ${
+      safeMode === "gen"
+        ? "Tạo đề mới dựa trên tài liệu/chủ đề đầu vào"
+        : "Tách đề có sẵn từ ảnh/văn bản đầu vào"
+    }.`,
+    `Định dạng: ${
+      safeFormat === "short"
+        ? "Trắc nghiệm ngắn"
+        : "Cấu trúc đề THPT (mcq, tf, short)"
+    }.`,
+    imageCount > 0
+      ? `Số trang ảnh đính kèm: ${imageCount} (đánh số trang từ 0 đến ${imageCount - 1}).`
+      : "Không có ảnh đính kèm.",
     p1 || p2 || p3
       ? `Số lượng câu gợi ý: Phần I (mcq) = ${p1}, Phần II (tf) = ${p2}, Phần III (short) = ${p3}.`
       : "Tự động phân bổ hợp lý theo nội dung đề.",
@@ -119,12 +146,27 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "method_not_allowed" });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = (process.env.GEMINI_API_KEY || "").trim();
   if (!apiKey) {
-    return res.status(500).json({ error: "missing_key" });
+    return res.status(500).json({
+      error: "missing_key",
+      hint: "Chưa đặt GEMINI_API_KEY trên Vercel (Settings → Environment Variables), rồi Redeploy.",
+    });
   }
 
-  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const model =
+    (process.env.GEMINI_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+
+  let body = req.body;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      body = {};
+    }
+  }
+  if (!body || typeof body !== "object") body = {};
+
   const images = Array.isArray(body.images) ? body.images : [];
   const text = typeof body.text === "string" ? body.text : "";
   const subject = typeof body.subject === "string" ? body.subject : "";
@@ -134,6 +176,14 @@ export default async function handler(req, res) {
     body.counts && typeof body.counts === "object" ? body.counts : {};
 
   const parsedImages = images.map(parseBase64Image).filter(Boolean);
+
+  if (parsedImages.length === 0 && !text.trim()) {
+    return res.status(400).json({
+      error: "empty_input",
+      hint: "Không có ảnh hoặc văn bản nào được gửi lên.",
+    });
+  }
+
   const prompt = buildPrompt({
     text,
     subject,
@@ -154,41 +204,54 @@ export default async function handler(req, res) {
   }
   parts.push({ text: prompt });
 
+  let rawText = "";
   try {
     const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-
     const response = await ai.models.generateContent({
       model,
-      contents: parts,
+      contents: [{ role: "user", parts }],
       config: {
         responseMimeType: "application/json",
         temperature: 0.2,
       },
     });
-
-    const rawText = response?.text ?? "";
-    const jsonBlock = extractFirstJsonBlock(rawText);
-    if (!jsonBlock) {
-      return res.status(422).json({ error: "invalid_json" });
-    }
-
-    let parsedExam;
-    try {
-      parsedExam = JSON.parse(jsonBlock);
-    } catch {
-      return res.status(422).json({ error: "invalid_json" });
-    }
-
-    if (!parsedExam || typeof parsedExam !== "object") {
-      return res.status(422).json({ error: "invalid_json" });
-    }
-
-    return res.status(200).json(parsedExam);
+    rawText = getResponseText(response);
   } catch (err) {
+    console.error("[extract] Gemini request failed:", err);
     return res.status(500).json({
       error: "gemini_request_failed",
       message: err?.message || "Unknown error",
+      model,
+      hint: "Kiểm tra GEMINI_API_KEY còn hiệu lực và GEMINI_MODEL là tên model hợp lệ (ví dụ gemini-2.5-flash).",
     });
   }
+
+  const jsonBlock = extractFirstJsonBlock(rawText);
+  if (!jsonBlock) {
+    console.error(
+      "[extract] No JSON found. Raw text head:",
+      rawText.slice(0, 300),
+    );
+    return res.status(422).json({
+      error: "invalid_json",
+      hint: "AI trả về không có khối JSON. Thử lại với ít trang hơn.",
+    });
+  }
+
+  let parsedExam;
+  try {
+    parsedExam = JSON.parse(jsonBlock);
+  } catch (err) {
+    console.error("[extract] JSON parse failed:", err?.message);
+    return res.status(422).json({
+      error: "invalid_json",
+      hint: "JSON từ AI bị lỗi cú pháp. Thử lại hoặc giảm số trang.",
+    });
+  }
+
+  if (!parsedExam || typeof parsedExam !== "object") {
+    return res.status(422).json({ error: "invalid_json" });
+  }
+
+  return res.status(200).json(parsedExam);
 }
