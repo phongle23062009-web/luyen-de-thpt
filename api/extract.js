@@ -3,8 +3,8 @@ import { GoogleGenAI } from "@google/genai";
 // Thứ tự thử model: nếu model đầu lỗi 404 thì thử model tiếp theo
 const FALLBACK_MODELS = [
   "gemini-2.5-flash",
-  "gemini-2.0-flash",
-  "gemini-1.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-pro",
 ];
 
 function getModelList() {
@@ -170,12 +170,10 @@ export default async function handler(req, res) {
 
   const parsedImages = images.map(parseBase64Image).filter(Boolean);
   if (parsedImages.length === 0 && !text.trim()) {
-    return res
-      .status(400)
-      .json({
-        error: "empty_input",
-        hint: "Không có ảnh hoặc văn bản nào được gửi lên.",
-      });
+    return res.status(400).json({
+      error: "empty_input",
+      hint: "Không có ảnh hoặc văn bản nào được gửi lên.",
+    });
   }
 
   const prompt = buildPrompt({
@@ -231,13 +229,11 @@ export default async function handler(req, res) {
   const jsonBlock = extractFirstJsonBlock(rawText);
   if (!jsonBlock) {
     console.error("[extract] No JSON. Head:", rawText.slice(0, 300));
-    return res
-      .status(422)
-      .json({
-        error: "invalid_json",
-        model: usedModel,
-        hint: "AI không trả về JSON. Thử lại với ít trang hơn.",
-      });
+    return res.status(422).json({
+      error: "invalid_json",
+      model: usedModel,
+      hint: "AI không trả về JSON. Thử lại với ít trang hơn.",
+    });
   }
 
   let parsedExam;
@@ -245,13 +241,11 @@ export default async function handler(req, res) {
     parsedExam = JSON.parse(jsonBlock);
   } catch (err) {
     console.error("[extract] JSON parse failed:", err?.message);
-    return res
-      .status(422)
-      .json({
-        error: "invalid_json",
-        model: usedModel,
-        hint: "JSON từ AI lỗi cú pháp. Thử lại.",
-      });
+    return res.status(422).json({
+      error: "invalid_json",
+      model: usedModel,
+      hint: "JSON từ AI lỗi cú pháp. Thử lại.",
+    });
   }
 
   if (!parsedExam || typeof parsedExam !== "object") {
