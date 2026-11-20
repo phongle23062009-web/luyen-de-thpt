@@ -2,7 +2,7 @@
 // Khớp với index.html và các API: /api/extract, /api/grade-explain, /api/quick-tip, /api/chat
 
 const MAX_PAGES = 20; // tối đa số trang nạp vào
-const MAX_SEND = 8; // tối đa số trang gửi AI mỗi lần
+const MAX_SEND = 8; // tối đa số trang chọn cùng lúc (chế độ tạo đề mới)
 const RECENT_KEY = "recent_exams";
 const RECENT_LIMIT = 5;
 const LAYOUT_KEY = "layout_mode";
@@ -20,6 +20,8 @@ const SUBJECT_COUNTS = {
   dia: { p1: 24, p2: 4, p3: 0 },
   anh: { p1: 40, p2: 0, p3: 0 },
 };
+
+const TYPE_ORDER = { mcq: 1, tf: 2, short: 3 };
 
 const state = {
   pages: [], // { canvas, selected }
@@ -57,7 +59,7 @@ function toast(message, type = "info") {
   el.className = `toast toast-${type}`;
   el.textContent = message;
   box.appendChild(el);
-  setTimeout(() => el.remove(), 4000);
+  setTimeout(() => el.remove(), 5000);
 }
 
 function setLoading(on, text = "Đang xử lý...") {
@@ -148,7 +150,7 @@ function newCanvas(w, h) {
 }
 
 // Thu nhỏ canvas và trả về chuỗi base64 JPEG (không có tiền tố data:)
-function compressCanvas(canvas, maxSide = 1280, quality = 0.65) {
+function compressCanvas(canvas, maxSide = 1400, quality = 0.7) {
   const scale = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
   const out = newCanvas(canvas.width * scale, canvas.height * scale);
   out.getContext("2d").drawImage(canvas, 0, 0, out.width, out.height);
@@ -175,12 +177,10 @@ function clamp01(v) {
   return Math.min(1, Math.max(0, v));
 }
 
-// Cắt hình minh họa theo box [x0,y0,x1,y1] tọa độ 0–1000 trên trang đã chọn
-function cropFigure(fig, pages) {
+// Cắt hình minh họa theo box [x0,y0,x1,y1] tọa độ 0–1000 trên trang
+function cropFigure(fig, page) {
   if (!fig || typeof fig !== "object" || !Array.isArray(fig.box)) return null;
-  if (fig.box.length < 4) return null;
-  const page = pages[Number(fig.page)];
-  if (!page) return null;
+  if (fig.box.length < 4 || !page) return null;
   const src = page.canvas;
   const [a, b, c, d] = fig.box.map(Number);
   if ([a, b, c, d].some((n) => Number.isNaN(n))) return null;
@@ -266,7 +266,7 @@ async function loadFiles(files) {
 
   if (added) {
     if (!state.pages.some((p) => p.selected)) {
-      state.pages.slice(0, MAX_SEND).forEach((p) => (p.selected = true));
+      state.pages.slice(0, 3).forEach((p) => (p.selected = true));
     }
     setHidden($("page-grid-section"), false);
     renderPageGrid();
@@ -448,9 +448,9 @@ function normalizeKey(q, type) {
   return s || null;
 }
 
+// Chuyển dữ liệu AI thành câu hỏi. `pages` là danh sách trang tương ứng với figure.page
 function buildQuestions(data, format, pages) {
   const raw = Array.isArray(data?.questions) ? data.questions : [];
-  const order = { mcq: 1, tf: 2, short: 3 };
   const items = [];
 
   raw.forEach((q) => {
@@ -460,19 +460,20 @@ function buildQuestions(data, format, pages) {
     const text = String(q.prompt ?? q.text ?? "").trim();
     if (!text) return;
 
+    const fig = q.figure && typeof q.figure === "object" ? q.figure : null;
+    const page = pages[Number(fig?.page) || 0] || pages[0];
     items.push({
       type,
       text,
       options: type === "mcq" ? normalizeOptions(q.options) : null,
       statements: type === "tf" ? normalizeStatements(q.statements) : null,
       key: normalizeKey(q, type),
-      figure: q.figure && typeof q.figure === "object" ? q.figure : null,
-      figureImage: cropFigure(q.figure, pages),
+      figure: fig,
+      figureImage: cropFigure(fig, page),
     });
   });
 
-  items.sort((a, b) => order[a.type] - order[b.type]); // sort ổn định, giữ thứ tự trong nhóm
-  return items.map((it, i) => ({ ...it, number: i + 1 }));
+  return items;
 }
 
 function initialAnswer(q) {
@@ -482,6 +483,13 @@ function initialAnswer(q) {
 }
 
 /* ============ Tạo đề ============ */
+
+// Gộp câu từ nhiều trang: sắp theo loại (giữ thứ tự đọc), đánh số lại từ 1
+function mergeAndRenumber(list) {
+  return [...list]
+    .sort((a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type])
+    .map((q, i) => ({ ...q, number: i + 1 }));
+}
 
 async function createExam() {
   if (state.extracting) return;
@@ -507,53 +515,93 @@ async function createExam() {
     "short-mcq";
   const format = isShort ? "short" : "thpt";
 
-  // Chế độ trắc nghiệm ngắn: số câu do người dùng nhập (mặc định 10, tối đa 60)
   const shortCount = Math.max(
     1,
     Math.min(60, Number($("short-count")?.value) || 10),
   );
-  const counts = isShort
+  const totalCounts = isShort
     ? { p1: shortCount, p2: 0, p3: 0 }
     : SUBJECT_COUNTS[subjectKey] || { p1: 0, p2: 0, p3: 0 };
 
-  const images = selected.map((p) => compressCanvas(p.canvas));
-
   state.extracting = true;
-  setLoading(true, "AI đang đọc và tách đề, có thể mất 30–60 giây...");
-  const result = await postJSON("/api/extract", {
-    images,
-    text,
-    subject: subjectLabel,
-    mode,
-    format,
-    counts,
-  });
-  state.extracting = false;
-  setLoading(false);
+  let questions = [];
+  const failedPages = [];
+  let lastError = null;
 
-  if (!result.ok) {
-    toast(errorMessage(result), "error");
-    return;
+  try {
+    if (mode === "gen") {
+      // Tạo đề mới: gửi tất cả trang cùng lúc để AI soạn đủ số câu
+      setLoading(true, "AI đang soạn đề, có thể mất 30–60 giây...");
+      const r = await postJSON("/api/extract", {
+        images: selected.map((p) => compressCanvas(p.canvas)),
+        text,
+        subject: subjectLabel,
+        mode,
+        format,
+        counts: totalCounts,
+      });
+      if (r.ok) {
+        questions = mergeAndRenumber(buildQuestions(r.data, format, selected));
+      } else {
+        lastError = r;
+      }
+    } else {
+      // Tách đề có sẵn: gửi TỪNG trang để AI đọc kỹ và không bỏ sót câu
+      const jobs = selected.length ? selected : [null];
+      for (let i = 0; i < jobs.length; i++) {
+        const page = jobs[i];
+        setLoading(true, `Đang đọc trang ${i + 1}/${jobs.length}...`);
+        const r = await postJSON("/api/extract", {
+          images: page ? [compressCanvas(page.canvas)] : [],
+          text: i === 0 ? text : "",
+          subject: subjectLabel,
+          mode,
+          format,
+          counts: { p1: 0, p2: 0, p3: 0 }, // AI tự lấy hết câu trên trang
+        });
+        if (!r.ok) {
+          failedPages.push(i + 1);
+          lastError = r;
+          continue;
+        }
+        // Mỗi yêu cầu chỉ có 1 trang nên figure.page luôn là 0 → dùng đúng trang đó
+        questions.push(...buildQuestions(r.data, format, page ? [page] : []));
+      }
+      questions = mergeAndRenumber(questions);
+    }
+  } finally {
+    state.extracting = false;
+    setLoading(false);
   }
 
-  const questions = buildQuestions(result.data, format, selected);
   if (!questions.length) {
     toast(
-      "AI không tìm thấy câu hỏi nào. Thử đổi trang hoặc thêm văn bản.",
+      lastError
+        ? errorMessage(lastError)
+        : "AI không tìm thấy câu hỏi nào. Thử đổi trang hoặc thêm văn bản.",
       "error",
     );
     return;
   }
-  if (questions.length < counts.p1 + counts.p2 + counts.p3) {
+
+  if (failedPages.length) {
     toast(
-      `AI chỉ tạo được ${questions.length} câu. Thử chọn thêm trang hoặc bấm Tạo đề lại.`,
+      `Trang ${failedPages.join(", ")} không đọc được, các trang khác đã xong.`,
+      "warn",
+    );
+  } else if (
+    mode === "extract" &&
+    questions.length < totalCounts.p1 + totalCounts.p2 + totalCounts.p3
+  ) {
+    toast(
+      `Tách được ${questions.length} câu. Nếu thiếu, hãy chọn thêm trang có đề.`,
       "warn",
     );
   }
 
   openExam({
     id: makeId(),
-    title: result.data?.title || "Đề luyện tập",
+    title: "Đề luyện tập " + subjectLabel,
     subject: subjectLabel,
     format,
     createdAt: Date.now(),
