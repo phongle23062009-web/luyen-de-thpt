@@ -2,7 +2,7 @@
 // Khớp với index.html và các API: /api/extract, /api/grade-explain, /api/quick-tip, /api/chat
 
 const MAX_PAGES = 20; // tối đa số trang nạp vào
-const MAX_SEND = 4; // tối đa số trang gửi AI mỗi lần (tránh vượt giới hạn dữ liệu)
+const MAX_SEND = 8; // tối đa số trang gửi AI mỗi lần
 const RECENT_KEY = "recent_exams";
 const RECENT_LIMIT = 5;
 const LAYOUT_KEY = "layout_mode";
@@ -506,8 +506,14 @@ async function createExam() {
     document.querySelector('input[name="exam-format"]:checked')?.value ===
     "short-mcq";
   const format = isShort ? "short" : "thpt";
+
+  // Chế độ trắc nghiệm ngắn: số câu do người dùng nhập (mặc định 10, tối đa 60)
+  const shortCount = Math.max(
+    1,
+    Math.min(60, Number($("short-count")?.value) || 10),
+  );
   const counts = isShort
-    ? { p1: 10, p2: 0, p3: 0 }
+    ? { p1: shortCount, p2: 0, p3: 0 }
     : SUBJECT_COUNTS[subjectKey] || { p1: 0, p2: 0, p3: 0 };
 
   const images = selected.map((p) => compressCanvas(p.canvas));
@@ -537,6 +543,12 @@ async function createExam() {
       "error",
     );
     return;
+  }
+  if (questions.length < counts.p1 + counts.p2 + counts.p3) {
+    toast(
+      `AI chỉ tạo được ${questions.length} câu. Thử chọn thêm trang hoặc bấm Tạo đề lại.`,
+      "warn",
+    );
   }
 
   openExam({
