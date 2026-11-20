@@ -1,7 +1,12 @@
 import { GoogleGenAI } from "@google/genai";
 
 // ===== Cấu hình =====
-const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+const GEMINI_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.5-flash",
+];
+const OPENROUTER_DEFAULT_MODEL = "google/gemma-4-26b-a4b-it:free";
 const GEMINI_TIMEOUT_MS = 25000;
 const OTHER_TIMEOUT_MS = 30000;
 
@@ -181,15 +186,19 @@ async function runGemini(parts, apiKey) {
     tried.push(model);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
+        const config = {
+          responseMimeType: "application/json",
+          temperature: 0.2,
+        };
+        // Chỉ model 2.5 hỗ trợ tắt suy nghĩ bằng thinkingBudget
+        if (model.startsWith("gemini-2.5")) {
+          config.thinkingConfig = { thinkingBudget: 0 };
+        }
         const response = await withTimeout(
           ai.models.generateContent({
             model,
             contents: [{ role: "user", parts }],
-            config: {
-              responseMimeType: "application/json",
-              temperature: 0.2,
-              thinkingConfig: { thinkingBudget: 0 },
-            },
+            config,
           }),
           GEMINI_TIMEOUT_MS,
           "Gemini",
@@ -197,14 +206,11 @@ async function runGemini(parts, apiKey) {
         return { text: getResponseText(response), model: `gemini:${model}` };
       } catch (err) {
         lastErr = err;
-        // Quá chậm: không thử tiếp, chuyển sang AI dự phòng ngay
         if (err.timeout) throw Object.assign(err, { tried });
-        // Lỗi tạm thời: thử lại đúng 1 lần
         if (isBusy(err) && attempt === 0) {
           await sleep(2000);
           continue;
         }
-        // Lỗi khác (model không có, khóa sai...): sang model kế tiếp
         break;
       }
     }
@@ -212,17 +218,9 @@ async function runGemini(parts, apiKey) {
   throw Object.assign(lastErr || new Error("Gemini thất bại"), { tried });
 }
 
-/* ===================== OpenRouter / Groq (OpenAI-compatible) ===================== */
+/* ===================== OpenRouter (OpenAI-compatible) ===================== */
 
-async function callOpenAICompatible({
-  name,
-  url,
-  key,
-  model,
-  images,
-  prompt,
-  jsonMode,
-}) {
+async function callOpenRouter(images, prompt, model, key) {
   const content = [
     ...images.map((img) => ({
       type: "image_url",
@@ -231,29 +229,26 @@ async function callOpenAICompatible({
     { type: "text", text: prompt },
   ];
 
-  const body = {
-    model,
-    messages: [{ role: "user", content }],
-    temperature: 0.2,
-  };
-  if (jsonMode) body.response_format = { type: "json_object" };
-
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), OTHER_TIMEOUT_MS);
   let res;
   try {
-    res = await fetch(url, {
+    res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${key}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content }],
+        temperature: 0.2,
+      }),
       signal: controller.signal,
     });
   } catch (err) {
     throw new Error(
-      `${name}: ${err.name === "AbortError" ? "hết thời gian chờ" : err.message}`,
+      `OpenRouter: ${err.name === "AbortError" ? "hết thời gian chờ" : err.message}`,
     );
   } finally {
     clearTimeout(timer);
@@ -262,11 +257,11 @@ async function callOpenAICompatible({
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(
-      `${name} ${res.status}: ${data?.error?.message || "lỗi không rõ"}`,
+      `OpenRouter ${res.status}: ${data?.error?.message || "lỗi không rõ"}`,
     );
   }
   const text = data?.choices?.[0]?.message?.content;
-  if (!text) throw new Error(`${name}: phản hồi rỗng`);
+  if (!text) throw new Error("OpenRouter: phản hồi rỗng");
   return text;
 }
 
@@ -336,54 +331,16 @@ export default async function handler(req, res) {
     }
   }
 
-  // 2) OpenRouter
+  // 2) OpenRouter (model miễn phí có đọc ảnh)
   if (!usedModel) {
     const key = env("OPENROUTER_API_KEY");
-    const model = env("OPENROUTER_MODEL");
-    if (!key) problems.push("openrouter: chưa đặt OPENROUTER_API_KEY");
-    else if (!model)
-      problems.push(
-        "openrouter: chưa đặt OPENROUTER_MODEL (chọn model có Image input trên openrouter.ai/models)",
-      );
-    else {
+    const model = env("OPENROUTER_MODEL") || OPENROUTER_DEFAULT_MODEL;
+    if (!key) {
+      problems.push("openrouter: chưa đặt OPENROUTER_API_KEY");
+    } else {
       try {
-        rawText = await callOpenAICompatible({
-          name: "OpenRouter",
-          url: "https://openrouter.ai/api/v1/chat/completions",
-          key,
-          model,
-          images: parsedImages,
-          prompt,
-          jsonMode: false,
-        });
+        rawText = await callOpenRouter(parsedImages, prompt, model, key);
         usedModel = `openrouter:${model}`;
-      } catch (err) {
-        problems.push(errMessage(err).slice(0, 200));
-      }
-    }
-  }
-
-  // 3) Groq
-  if (!usedModel) {
-    const key = env("GROQ_API_KEY");
-    const model = env("GROQ_MODEL");
-    if (!key) problems.push("groq: chưa đặt GROQ_API_KEY");
-    else if (!model)
-      problems.push(
-        "groq: chưa đặt GROQ_MODEL (chọn model vision trên console.groq.com/docs/models)",
-      );
-    else {
-      try {
-        rawText = await callOpenAICompatible({
-          name: "Groq",
-          url: "https://api.groq.com/openai/v1/chat/completions",
-          key,
-          model,
-          images: parsedImages,
-          prompt,
-          jsonMode: true,
-        });
-        usedModel = `groq:${model}`;
       } catch (err) {
         problems.push(errMessage(err).slice(0, 200));
       }
