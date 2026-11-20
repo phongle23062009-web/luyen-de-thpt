@@ -1,24 +1,50 @@
 import { GoogleGenAI } from "@google/genai";
 
 // ===== Cấu hình =====
-// Khóa lấy từ biến môi trường trên Vercel. Tên model có sẵn mặc định trong code,
-// chỉ đặt biến *_MODEL nếu muốn đổi sang model khác.
-const GEMINI_FALLBACK_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
-  "gemini-flash-latest",
-];
-const GEMINI_RETRIES = 2;
-const GEMINI_TIMEOUT_MS = 40000;
-const OPENAI_COMPAT_TIMEOUT_MS = 40000;
-
-const OPENROUTER_DEFAULT_MODEL = "google/gemma-3-27b-it:free";
-const GROQ_DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
+const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+const GEMINI_TIMEOUT_MS = 25000;
+const OTHER_TIMEOUT_MS = 30000;
 
 /* ===================== Tiện ích ===================== */
 
 function env(name) {
   return (process.env[name] || "").trim();
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function errStatus(err) {
+  return err?.status ?? err?.code ?? err?.error?.code ?? null;
+}
+
+function errMessage(err) {
+  return String(err?.message || err?.error?.message || "");
+}
+
+// Lỗi tạm thời: đáng thử lại
+function isBusy(err) {
+  const s = errStatus(err);
+  return (
+    s === 503 ||
+    s === 429 ||
+    /high demand|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded/i.test(
+      errMessage(err),
+    )
+  );
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const e = new Error(`${label} không phản hồi sau ${ms / 1000} giây`);
+      e.timeout = true;
+      reject(e);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 function parseBase64Image(raw) {
@@ -71,46 +97,6 @@ function getResponseText(response) {
   const parts = response?.candidates?.[0]?.content?.parts;
   if (Array.isArray(parts)) return parts.map((p) => p?.text || "").join("");
   return "";
-}
-
-function errStatus(err) {
-  return err?.status ?? err?.code ?? err?.error?.code ?? null;
-}
-
-function errMessage(err) {
-  return String(err?.message || err?.error?.message || "");
-}
-
-function isModelNotFound(err) {
-  const status = errStatus(err);
-  return (
-    status === 404 || /not found|not supported|NOT_FOUND/i.test(errMessage(err))
-  );
-}
-
-function isRetryable(err) {
-  const status = errStatus(err);
-  return (
-    status === 503 ||
-    status === 429 ||
-    status === 500 ||
-    status === 504 ||
-    /high demand|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|timeout/i.test(
-      errMessage(err),
-    )
-  );
-}
-
-function withTimeout(promise, ms, label) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      const e = new Error(`${label} không phản hồi sau ${ms / 1000} giây`);
-      e.code = 504;
-      reject(e);
-    }, ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 /* ===================== Prompt ===================== */
@@ -181,72 +167,52 @@ function buildPrompt({ text, subject, format, mode, counts, imageCount }) {
     .join("\n\n");
 }
 
-/* ===================== Nhà cung cấp 1: Gemini ===================== */
-
-function getGeminiModelList() {
-  const preferred = env("GEMINI_MODEL");
-  const list = preferred
-    ? [preferred, ...GEMINI_FALLBACK_MODELS]
-    : [...GEMINI_FALLBACK_MODELS];
-  return [...new Set(list)];
-}
-
-async function callGeminiWithRetry(ai, params) {
-  let lastErr = null;
-  for (let attempt = 0; attempt <= GEMINI_RETRIES; attempt++) {
-    try {
-      return await withTimeout(
-        ai.models.generateContent(params),
-        GEMINI_TIMEOUT_MS,
-        "Gemini",
-      );
-    } catch (err) {
-      lastErr = err;
-      console.error(
-        `[extract] gemini ${params.model} lần ${attempt + 1}:`,
-        errStatus(err),
-        errMessage(err).slice(0, 200),
-      );
-      if (!isRetryable(err) || attempt === GEMINI_RETRIES) throw err;
-      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
-    }
-  }
-  throw lastErr;
-}
+/* ===================== Gemini ===================== */
 
 async function runGemini(parts, apiKey) {
   const ai = new GoogleGenAI({ apiKey });
+  const models = [
+    ...new Set([env("GEMINI_MODEL"), ...GEMINI_MODELS].filter(Boolean)),
+  ];
   const tried = [];
   let lastErr = null;
 
-  for (const model of getGeminiModelList()) {
+  for (const model of models) {
     tried.push(model);
-    try {
-      const response = await callGeminiWithRetry(ai, {
-        model,
-        contents: [{ role: "user", parts }],
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.2,
-          thinkingConfig: { thinkingBudget: 0 },
-        },
-      });
-      return {
-        text: getResponseText(response),
-        model: `gemini:${model}`,
-        tried,
-      };
-    } catch (err) {
-      lastErr = err;
-      if (!isModelNotFound(err) && !isRetryable(err)) break;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model,
+            contents: [{ role: "user", parts }],
+            config: {
+              responseMimeType: "application/json",
+              temperature: 0.2,
+              thinkingConfig: { thinkingBudget: 0 },
+            },
+          }),
+          GEMINI_TIMEOUT_MS,
+          "Gemini",
+        );
+        return { text: getResponseText(response), model: `gemini:${model}` };
+      } catch (err) {
+        lastErr = err;
+        // Quá chậm: không thử tiếp, chuyển sang AI dự phòng ngay
+        if (err.timeout) throw Object.assign(err, { tried });
+        // Lỗi tạm thời: thử lại đúng 1 lần
+        if (isBusy(err) && attempt === 0) {
+          await sleep(2000);
+          continue;
+        }
+        // Lỗi khác (model không có, khóa sai...): sang model kế tiếp
+        break;
+      }
     }
   }
-  const e = lastErr || new Error("Gemini thất bại");
-  e.tried = tried;
-  throw e;
+  throw Object.assign(lastErr || new Error("Gemini thất bại"), { tried });
 }
 
-/* ===================== Nhà cung cấp 2 & 3: OpenAI-compatible ===================== */
+/* ===================== OpenRouter / Groq (OpenAI-compatible) ===================== */
 
 async function callOpenAICompatible({
   name,
@@ -273,7 +239,7 @@ async function callOpenAICompatible({
   if (jsonMode) body.response_format = { type: "json_object" };
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), OPENAI_COMPAT_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), OTHER_TIMEOUT_MS);
   let res;
   try {
     res = await fetch(url, {
@@ -286,60 +252,22 @@ async function callOpenAICompatible({
       signal: controller.signal,
     });
   } catch (err) {
-    const e = new Error(
+    throw new Error(
       `${name}: ${err.name === "AbortError" ? "hết thời gian chờ" : err.message}`,
     );
-    e.code = 504;
-    throw e;
   } finally {
     clearTimeout(timer);
   }
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const e = new Error(
+    throw new Error(
       `${name} ${res.status}: ${data?.error?.message || "lỗi không rõ"}`,
     );
-    e.code = res.status;
-    throw e;
   }
   const text = data?.choices?.[0]?.message?.content;
   if (!text) throw new Error(`${name}: phản hồi rỗng`);
   return text;
-}
-
-function runOpenRouter(images, prompt) {
-  const key = env("OPENROUTER_API_KEY");
-  if (!key)
-    return Promise.reject(
-      Object.assign(new Error("Chưa đặt OPENROUTER_API_KEY"), { skip: true }),
-    );
-  return callOpenAICompatible({
-    name: "OpenRouter",
-    url: "https://openrouter.ai/api/v1/chat/completions",
-    key,
-    model: env("OPENROUTER_MODEL") || OPENROUTER_DEFAULT_MODEL,
-    images,
-    prompt,
-    jsonMode: false,
-  }).then((text) => ({ text, model: "openrouter" }));
-}
-
-function runGroq(images, prompt) {
-  const key = env("GROQ_API_KEY");
-  if (!key)
-    return Promise.reject(
-      Object.assign(new Error("Chưa đặt GROQ_API_KEY"), { skip: true }),
-    );
-  return callOpenAICompatible({
-    name: "Groq",
-    url: "https://api.groq.com/openai/v1/chat/completions",
-    key,
-    model: env("GROQ_MODEL") || GROQ_DEFAULT_MODEL,
-    images,
-    prompt,
-    jsonMode: true,
-  }).then((text) => ({ text, model: "groq" }));
 }
 
 /* ===================== Handler ===================== */
@@ -388,73 +316,92 @@ export default async function handler(req, res) {
   }));
   parts.push({ text: prompt });
 
-  const providerErrors = [];
+  const problems = [];
   let rawText = "";
   let usedModel = "";
-  let tried = [];
 
   // 1) Gemini
   const geminiKey = env("GEMINI_API_KEY");
-  if (geminiKey) {
+  if (!geminiKey) {
+    problems.push("gemini: chưa đặt GEMINI_API_KEY");
+  } else {
     try {
       const r = await runGemini(parts, geminiKey);
       rawText = r.text;
       usedModel = r.model;
-      tried = r.tried;
     } catch (err) {
-      tried = err.tried || [];
-      providerErrors.push({
-        provider: "gemini",
-        status: errStatus(err),
-        message: errMessage(err).slice(0, 300),
-      });
+      problems.push(
+        `gemini: ${errMessage(err).slice(0, 200) || "lỗi không rõ"}`,
+      );
     }
-  } else {
-    providerErrors.push({
-      provider: "gemini",
-      message: "Chưa đặt GEMINI_API_KEY",
-    });
   }
 
-  // 2) OpenRouter, rồi 3) Groq (chỉ khi Gemini chưa được)
+  // 2) OpenRouter
   if (!usedModel) {
-    for (const [provider, run] of [
-      ["openrouter", () => runOpenRouter(parsedImages, prompt)],
-      ["groq", () => runGroq(parsedImages, prompt)],
-    ]) {
+    const key = env("OPENROUTER_API_KEY");
+    const model = env("OPENROUTER_MODEL");
+    if (!key) problems.push("openrouter: chưa đặt OPENROUTER_API_KEY");
+    else if (!model)
+      problems.push(
+        "openrouter: chưa đặt OPENROUTER_MODEL (chọn model có Image input trên openrouter.ai/models)",
+      );
+    else {
       try {
-        const r = await run();
-        rawText = r.text;
-        usedModel = r.model;
-        break;
+        rawText = await callOpenAICompatible({
+          name: "OpenRouter",
+          url: "https://openrouter.ai/api/v1/chat/completions",
+          key,
+          model,
+          images: parsedImages,
+          prompt,
+          jsonMode: false,
+        });
+        usedModel = `openrouter:${model}`;
       } catch (err) {
-        if (err.skip) {
-          providerErrors.push({ provider, message: err.message });
-        } else {
-          console.error(`[extract] ${provider} lỗi:`, errMessage(err));
-          providerErrors.push({
-            provider,
-            status: errStatus(err),
-            message: errMessage(err).slice(0, 300),
-          });
-        }
+        problems.push(errMessage(err).slice(0, 200));
+      }
+    }
+  }
+
+  // 3) Groq
+  if (!usedModel) {
+    const key = env("GROQ_API_KEY");
+    const model = env("GROQ_MODEL");
+    if (!key) problems.push("groq: chưa đặt GROQ_API_KEY");
+    else if (!model)
+      problems.push(
+        "groq: chưa đặt GROQ_MODEL (chọn model vision trên console.groq.com/docs/models)",
+      );
+    else {
+      try {
+        rawText = await callOpenAICompatible({
+          name: "Groq",
+          url: "https://api.groq.com/openai/v1/chat/completions",
+          key,
+          model,
+          images: parsedImages,
+          prompt,
+          jsonMode: true,
+        });
+        usedModel = `groq:${model}`;
+      } catch (err) {
+        problems.push(errMessage(err).slice(0, 200));
       }
     }
   }
 
   if (!usedModel) {
-    const allOverloaded = providerErrors.some(
-      (p) => p.status === 503 || p.status === 429 || p.status === 504,
+    const busy = problems.some((p) =>
+      /quá tải|high demand|UNAVAILABLE|429|503|hết thời gian|không phản hồi/i.test(
+        p,
+      ),
     );
-    return res.status(allOverloaded ? 503 : 500).json({
+    return res.status(busy ? 503 : 500).json({
       error: "gemini_request_failed",
-      message: providerErrors
-        .map((p) => `${p.provider}: ${p.message}`)
-        .join(" | "),
-      tried,
-      hint: allOverloaded
-        ? "Các AI đang quá tải hoặc hết lượt. Đợi vài phút rồi thử lại, hoặc giảm số trang."
-        : "Kiểm tra các khóa API trên Vercel (GEMINI_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY), rồi Redeploy.",
+      message: problems.join(" | "),
+      hint: busy
+        ? "Có AI đang chậm hoặc quá tải. Thử lại sau vài phút, hoặc chọn 1 trang."
+        : "Xem message: sửa khóa hoặc tên model tương ứng trên Vercel, rồi Redeploy.",
     });
   }
 
