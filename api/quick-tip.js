@@ -1,56 +1,116 @@
 import { GoogleGenAI } from "@google/genai";
 
-function buildQuickTipPrompt({ question, subject }) {
-  const safeSubject = subject || "Tổng hợp THPT";
+const MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite"];
+const OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it:free";
 
-  return [
-    "Bạn là giáo viên luyện thi THPT chuyên giải nhanh trắc nghiệm.",
-    `Môn học: ${safeSubject}.`,
-    "Nhiệm vụ: Đưa ra hướng xử lý nhanh cho câu hỏi trắc nghiệm: công thức nhớ nhanh (kèm điều kiện áp dụng rõ ràng), mẹo loại trừ đáp án, hoặc cách bấm máy tính Casio nếu phù hợp.",
-    "Quy tắc bắt buộc:",
-    "- Tuyệt đối không bịa công thức, mẹo hay phím bấm Casio.",
-    "- Nếu câu hỏi không có mẹo/công thức nhanh thực sự hiệu quả, hãy nói thẳng và hướng dẫn cách giải chuẩn ngắn gọn.",
-    "- Độ dài tối đa khoảng 10 dòng, súc tích, rõ ý.",
-    "- Mọi công thức toán, lý, hóa, ký hiệu khoa học viết bằng LaTeX trong cặp dấu $...$.",
-    "- Chỉ trả về nội dung dạng văn bản thuần túy/Markdown, không bọc trong khối JSON.",
-    `Dữ liệu câu hỏi:\n${typeof question === "string" ? question : JSON.stringify(question ?? "", null, 2)}`,
-  ].join("\n\n");
+function env(n) {
+  return (process.env[n] || "").trim();
+}
+
+function withTimeout(p, ms) {
+  let t;
+  const to = new Promise((_, rej) => {
+    t = setTimeout(() => rej(new Error("hết thời gian chờ")), ms);
+  });
+  return Promise.race([p, to]).finally(() => clearTimeout(t));
+}
+
+function toGemini(messages) {
+  const sys = messages
+    .filter((m) => m.role === "system")
+    .map((m) => m.content)
+    .join("\n");
+  const rest = messages.filter((m) => m.role !== "system");
+  return rest.map((m, i) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: (i === 0 && sys ? sys + "\n\n" : "") + m.content }],
+  }));
+}
+
+async function ask(messages) {
+  const problems = [];
+  const gkey = env("GEMINI_API_KEY");
+  if (gkey) {
+    const ai = new GoogleGenAI({ apiKey: gkey });
+    const models = [
+      ...new Set([env("GEMINI_MODEL"), ...MODELS].filter(Boolean)),
+    ];
+    for (const model of models) {
+      try {
+        const r = await withTimeout(
+          ai.models.generateContent({
+            model,
+            contents: toGemini(messages),
+            config: { temperature: 0.2 },
+          }),
+          25000,
+        );
+        const text = typeof r.text === "function" ? r.text() : r.text;
+        if (text) return text;
+      } catch (e) {
+        problems.push(
+          `gemini ${model}: ${String(e?.message || e).slice(0, 150)}`,
+        );
+      }
+    }
+  } else {
+    problems.push("gemini: chưa đặt GEMINI_API_KEY");
+  }
+
+  const okey = env("OPENROUTER_API_KEY");
+  if (okey) {
+    try {
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${okey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: env("OPENROUTER_MODEL") || OPENROUTER_MODEL,
+          messages,
+          temperature: 0.2,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok)
+        throw new Error(data?.error?.message || `HTTP ${res.status}`);
+      const text = data?.choices?.[0]?.message?.content;
+      if (text) return text;
+      problems.push("openrouter: phản hồi rỗng");
+    } catch (e) {
+      problems.push(`openrouter: ${String(e?.message || e).slice(0, 150)}`);
+    }
+  }
+  throw new Error(problems.join(" | "));
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
+  if (req.method !== "POST")
     return res.status(405).json({ error: "method_not_allowed" });
+  let body = req.body;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      body = {};
+    }
   }
-
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "missing_key" });
-  }
-
-  const body = req.body && typeof req.body === "object" ? req.body : {};
-  const prompt = buildQuickTipPrompt({
-    question: body.question,
-    subject: body.subject,
-  });
+  body = body && typeof body === "object" ? body : {};
+  const question = String(body.question || "");
+  const subject = String(body.subject || "");
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-
-    const response = await ai.models.generateContent({
-      model,
-      contents: prompt,
-      config: {
-        temperature: 0.25,
+    const text = await ask([
+      {
+        role: "system",
+        content:
+          "Bạn là gia sư luyện thi THPT. Đưa cách làm NHANH cho câu trắc nghiệm bằng tiếng Việt, tối đa khoảng 10 dòng gồm: (1) công thức nhớ nhanh, nêu rõ điều kiện áp dụng; (2) mẹo loại trừ hoặc thử đáp án; (3) cách bấm máy Casio nếu phù hợp. Không bịa công thức. Nếu không có mẹo thật sự hiệu quả, nói thẳng. Dùng LaTeX trong $...$.",
       },
-    });
-
-    const text = (response?.text ?? "").trim();
+      { role: "user", content: `Môn: ${subject}\nCâu hỏi:\n${question}` },
+    ]);
     return res.status(200).json({ text });
   } catch (err) {
-    return res.status(500).json({
-      error: "gemini_request_failed",
-      message: err?.message || "Unknown error",
-    });
+    return res.status(503).json({ error: "ai_failed", message: err.message });
   }
 }
