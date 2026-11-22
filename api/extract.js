@@ -159,6 +159,7 @@ const EXAM_SCHEMA = {
           answer: { type: Type.STRING, nullable: true },
           // true nếu đáp án/phương án nhiễu do AI tự giải, tự tạo
           solved: { type: Type.BOOLEAN },
+          difficulty: { type: Type.INTEGER }, // 1 dễ, 2 vừa, 3 khó
           figure: {
             type: Type.OBJECT,
             nullable: true,
@@ -226,6 +227,8 @@ function salvageQuestions(text) {
 }
 
 /* ===================== Prompt ===================== */
+
+export const config = { maxDuration: 60 }; // cho phép hàm chạy tới 60 giây (mặc định có thể chỉ 10 giây → lỗi 504)
 
 function buildPrompt({
   text,
@@ -310,6 +313,7 @@ function buildPrompt({
     `${isGen ? "5" : "6"}. solved = true khi đáp án do bạn tự giải hoặc phương án nhiễu do bạn tự tạo; solved = false khi câu hỏi và đáp án lấy nguyên từ tài liệu.`,
     `${isGen ? "6" : "7"}. Công thức toán, lý, hóa đặt trong $...$ (ví dụ $\\frac{1}{2}$; hóa học: $\\mathrm{CH_3NH_2}$, $\\mathrm{H_2SO_4}$). Trong chuỗi JSON, mọi dấu gạch chéo ngược phải viết thành hai dấu \\\\.`,
     `${isGen ? "7" : "8"}. HÌNH MINH HỌA: nếu câu có hình đi kèm (công thức cấu tạo, đồ thị, hình học, sơ đồ, thí nghiệm, bảng dạng ảnh) nằm dưới hoặc bên cạnh câu hỏi, hoặc các lựa chọn là hình vẽ, hãy đặt figure = {"page": số trang, "box": [ymin, xmin, ymax, xmax]} với tọa độ nguyên 0–1000 (gốc ở góc trên trái của trang, ymin/ymax theo chiều cao, xmin/xmax theo chiều rộng). Box chỉ bao phần hình (chừa lề nhỏ), không bao chữ của câu hỏi. Chữ của câu vẫn phải gõ đầy đủ trong prompt, giữ cả lời dẫn như "có công thức như sau" hoặc "như hình vẽ". Câu không có hình thì figure = null. Nếu các phương án A–D là hình vẽ (đồ thị, sơ đồ, hình học...) thì vẫn là mcq với options = {"A":"Hình A","B":"Hình B","C":"Hình C","D":"Hình D"} và figure là khung bao CẢ bốn hình cùng nhãn A, B, C, D; nếu một ý a–d của câu đúng/sai là hình thì ghi "Xem hình" cho ý đó. BẮT BUỘC: câu nhắc "như hình vẽ", "hình bên", "đồ thị", "sơ đồ", "hình sau" hoặc có phương án là hình thì figure KHÔNG được để null.`,
+    `${isGen ? "8" : "9"}. difficulty: độ khó của câu, số nguyên 1–3. 1 = dễ (nhận biết, nhớ công thức/khái niệm, làm trong khoảng 1 phút); 2 = vừa (thông hiểu, cần vài bước tính hoặc suy luận); 3 = khó (vận dụng/vận dụng cao, nhiều bước, mất 4–5 phút).`,
     `${isGen ? "8" : "9"}. Chỉ trả về MỘT đối tượng JSON thuần túy, không lời dẫn, không markdown.`,
     "",
     "Mẫu JSON (chỉ là ví dụ về cấu trúc):",

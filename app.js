@@ -6,7 +6,7 @@ const MAX_SEND = 8; // tối đa số trang chọn cùng lúc (chế độ tạo
 const RECENT_KEY = "recent_exams";
 const RECENT_LIMIT = 5;
 const LAYOUT_KEY = "layout_mode";
-const EXTRACT_CONCURRENCY = 3; // số trang đọc song song (free tier chịu được 2–3)
+const EXTRACT_CONCURRENCY = 2; // số trang đọc song song (free tier hay bị giới hạn lượt gọi/phút)
 
 // Số câu theo cấu trúc đề THPT (Phần I / II / III)
 const SUBJECT_COUNTS = {
@@ -24,18 +24,32 @@ const SUBJECT_COUNTS = {
 
 const TYPE_ORDER = { mcq: 1, tf: 2, short: 3 };
 
+// Kiểu làm bài
+const MODE_LABEL = {
+  quick: "Luyện tập nhanh",
+  mock: "Thi thử THPT",
+  game: "Trò chơi",
+};
+const RECORD_KEY = "game_records";
+// Trò chơi: thời gian mỗi câu theo độ khó (tối đa 5 phút)
+const GAME_TIME_SEC = { 1: 60, 2: 150, 3: 300 };
+const DIFF_LABEL = { 1: "Dễ", 2: "Vừa", 3: "Khó" };
+const GAME_NEXT_DELAY_MS = 1800; // chờ xem kết quả rồi tự sang câu sau
+
 const state = {
   pages: [], // { canvas, selected }
   current: null, // đề đang làm
   idx: 0, // chỉ số câu hiện tại
-  tab: "essay", // tab lời giải đang mở
+  tab: "quick", // tab lời giải đang mở: quick (giải nhanh) | essay (chi tiết từng bước)
   explain: {}, // cache lời giải theo chỉ số câu
   quick: {}, // cache mẹo nhanh theo chỉ số câu
   chat: {}, // hội thoại theo chỉ số câu
   extracting: false,
   explaining: false,
   chatting: false,
-  quickLoading: {}, // câu đang chờ mẹo nhanh
+  quickLoading: {}, // câu đang chờ giải nhanh
+  gameNextTimer: null,
+  autoTimer: null,
 };
 
 /* ============ Tiện ích DOM ============ */
@@ -86,6 +100,14 @@ function typeset(nodes) {
 
 function makeId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// Mã băm ngắn để nhận ra "cùng một đề" (dùng cho kỷ lục)
+function hashStr(str) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++)
+    h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
 }
 
 /* ============ Hiển thị Markdown của AI (không còn ký tự ** thừa) ============ */
@@ -607,6 +629,20 @@ function pageSnapshot(page) {
   return page._snap;
 }
 
+// Ước lượng độ khó khi AI không cung cấp (1 dễ, 2 vừa, 3 khó)
+function estimateDifficulty(item) {
+  const len =
+    item.text.length +
+    (item.options || []).reduce((n, o) => n + o.text.length, 0) +
+    (item.statements || []).reduce((n, o) => n + o.text.length, 0);
+  const calc = /(tính|giá trị|bao nhiêu|xác định|\$|\d{2,})/i.test(item.text);
+  if (item.type === "short") return len > 260 ? 3 : 2;
+  if (item.type === "tf") return len > 500 ? 3 : 2;
+  if (len > 380) return 3;
+  if (len > 160 || (calc && len > 100)) return 2;
+  return 1;
+}
+
 // Chuyển dữ liệu AI thành câu hỏi. `pages` là danh sách trang tương ứng với figure.page
 // allowPageFallback: nếu câu cần hình mà AI không khoanh được thì hiện cả trang gốc (không dùng cho chế độ tạo đề mới)
 function buildQuestions(data, format, pages, allowPageFallback = true) {
@@ -644,7 +680,7 @@ function buildQuestions(data, format, pages, allowPageFallback = true) {
       figureImage = pageSnapshot(page);
       figureIsPage = true;
     }
-    items.push({
+    const item = {
       type,
       text,
       options: type === "mcq" ? opts : null,
@@ -654,7 +690,10 @@ function buildQuestions(data, format, pages, allowPageFallback = true) {
       figure: fig,
       figureImage,
       figureIsPage,
-    });
+    };
+    const d = Number(q.difficulty);
+    item.difficulty = [1, 2, 3].includes(d) ? d : estimateDifficulty(item);
+    items.push(item);
   });
   console.info(
     `[extract] AI trả ${raw.length} câu, giữ lại ${items.length} câu (định dạng: ${format})`,
@@ -697,18 +736,26 @@ async function createExam() {
     "generate"
       ? "gen"
       : "extract";
+  const playMode =
+    document.querySelector('input[name="play-mode"]:checked')?.value || "quick";
+  const mockMinutes = Number($("mock-time")?.value) || 0;
+  // Cấu trúc chỉ dùng khi AI tạo đề mới; tách đề thì lấy đủ mọi loại câu có trong tài liệu
   const isShort =
+    mode === "gen" &&
     document.querySelector('input[name="exam-format"]:checked')?.value ===
-    "short-mcq";
+      "short-mcq";
   const format = isShort ? "short" : "thpt";
 
   const shortCount = Math.max(
     1,
     Math.min(60, Number($("short-count")?.value) || 10),
   );
-  const totalCounts = isShort
-    ? { p1: shortCount, p2: 0, p3: 0 }
-    : SUBJECT_COUNTS[subjectKey] || { p1: 0, p2: 0, p3: 0 };
+  const totalCounts =
+    mode !== "gen"
+      ? { p1: 0, p2: 0, p3: 0 }
+      : isShort
+        ? { p1: shortCount, p2: 0, p3: 0 }
+        : SUBJECT_COUNTS[subjectKey] || { p1: 0, p2: 0, p3: 0 };
 
   state.extracting = true;
   let questions = [];
@@ -767,7 +814,7 @@ async function createExam() {
           done++;
           setLoading(true, `Đã đọc ${done}/${jobs.length} trang...`);
           if (!r.ok) {
-            failedPages.push(i + 1);
+            failedPages.push(page ? state.pages.indexOf(page) + 1 : 1);
             lastError = r;
             return;
           }
@@ -822,13 +869,10 @@ async function createExam() {
       `Trang ${failedPages.join(", ")} không đọc được, các trang khác đã xong.`,
       "warn",
     );
-  } else if (
-    mode === "extract" &&
-    questions.length < totalCounts.p1 + totalCounts.p2 + totalCounts.p3
-  ) {
+  } else if (mode === "extract") {
     toast(
-      `Tách được ${questions.length} câu. Nếu thiếu, hãy chọn thêm trang có đề.`,
-      "warn",
+      `Tách được ${questions.length} câu. Nếu thiếu, hãy kiểm tra lại các trang đã chọn.`,
+      "info",
     );
   }
 
@@ -839,16 +883,30 @@ async function createExam() {
     );
   }
 
-  openExam({
+  const exam = {
     id: makeId(),
     title: "Đề luyện tập " + subjectLabel,
     subject: subjectLabel,
     format,
+    mode: playMode,
+    timeLimitMin: playMode === "mock" ? mockMinutes : 0,
+    recordKey: hashStr(questions.map((q) => q.text).join("|")),
     createdAt: Date.now(),
     questions,
     answers: questions.map(initialAnswer),
     checked: questions.map(() => false),
-  });
+  };
+
+  // Thi thử và trò chơi cần có đáp án ngay từ đầu: nhờ AI giải trước các câu còn thiếu
+  if (playMode !== "quick" && exam.questions.some((q) => q.key == null)) {
+    setLoading(true, "AI đang chuẩn bị đáp án để chấm điểm...");
+    try {
+      await fillMissingKeys(exam);
+    } finally {
+      setLoading(false);
+    }
+  }
+  openExam(exam);
 }
 
 /* ============ Lưu bài gần đây (localStorage) ============ */
@@ -931,9 +989,9 @@ function renderRecent() {
     title.textContent = item.title || "Đề luyện tập";
     const meta = document.createElement("span");
     meta.className = "mu";
-    meta.textContent = `${item.subject || ""} · ${progressOf(item)} · ${new Date(
-      item.createdAt,
-    ).toLocaleString("vi-VN")}`;
+    meta.textContent = `${MODE_LABEL[modeOf(item)]} · ${item.subject || ""} · ${progressOf(item)}${
+      item.result ? ` · ${Number(item.result.score10).toFixed(2)}đ` : ""
+    } · ${new Date(item.createdAt).toLocaleString("vi-VN")}`;
     info.append(title, document.createElement("br"), meta);
 
     const openBtn = document.createElement("button");
@@ -982,7 +1040,10 @@ function sameAnswer(a, b) {
 
 function maxScore(q) {
   const total = state.current.questions.length;
-  if (state.current.format === "short") return 10 / Math.max(1, total);
+  const ex = state.current;
+  // Đề chỉ có trắc nghiệm: mọi câu bằng điểm nhau; đề hỗn hợp: theo thang THPT
+  if (ex.format === "short" || ex.questions.every((x) => x.type === "mcq"))
+    return 10 / Math.max(1, total);
   if (q.type === "mcq") return 0.25;
   if (q.type === "tf") return 1;
   // Đề THPT: câu trả lời ngắn môn Toán 0.5đ, các môn khác 0.25đ
@@ -1087,15 +1148,28 @@ function openExam(exam) {
   ) {
     exam.checked = exam.questions.map(() => false);
   }
+  exam.mode = MODE_LABEL[exam.mode] ? exam.mode : "quick";
+  exam.recordKey =
+    exam.recordKey || hashStr(exam.questions.map((q) => q.text).join("|"));
+  if (exam.mode === "mock" && !exam.submitted) startMock(exam);
+  if (exam.mode === "game" && !exam.game) exam.game = newGame();
+
+  clearTimeout(state.gameNextTimer);
+  clearTimeout(state.autoTimer);
+  autoSubmitId = null;
   state.current = exam;
   state.explain = {};
   state.quick = {};
   state.chat = {};
   state.quickLoading = {};
-  state.idx = Math.max(
-    0,
-    exam.questions.findIndex((q, i) => !isAnswered(q, exam.answers[i])),
-  );
+  state.tab = "quick";
+
+  const finished = isFinished(exam);
+  const firstTodo =
+    exam.mode === "game"
+      ? exam.questions.findIndex((q, i) => !exam.checked[i])
+      : exam.questions.findIndex((q, i) => !isAnswered(q, exam.answers[i]));
+  state.idx = finished ? 0 : Math.max(0, firstTodo);
 
   $("exam-title").textContent = exam.title || "Đề luyện tập";
   setHidden($("home-view"), true);
@@ -1104,9 +1178,21 @@ function openExam(exam) {
   $("exam-view").classList.add("active");
 
   saveCurrent();
-  showQuestion(state.idx);
+  if (exam.mode === "game" && !finished) gameBegin(state.idx);
+  else showQuestion(state.idx);
   window.scrollTo(0, 0);
-  solveInBackground(exam);
+
+  if (exam.mode === "quick") solveInBackground(exam);
+  if (
+    exam.mode === "mock" &&
+    !exam.submitted &&
+    exam.endsAt &&
+    Date.now() >= exam.endsAt
+  ) {
+    autoSubmitId = exam.id;
+    toast("Đã hết giờ làm bài, bài được nộp tự động.", "warn");
+    submitExam({ auto: true });
+  }
 }
 
 function showQuestion(i) {
@@ -1115,10 +1201,14 @@ function showQuestion(i) {
   state.idx = Math.max(0, Math.min(i, exam.questions.length - 1));
   const idx = state.idx;
   const q = exam.questions[idx];
+  applyModeUI(exam);
 
   const partNames = { mcq: "Phần I", tf: "Phần II", short: "Phần III" };
-  $("question-part-badge").textContent =
-    exam.format === "short" ? "Trắc nghiệm" : partNames[q.type];
+  $("question-part-badge").textContent = exam.questions.every(
+    (x) => x.type === "mcq",
+  )
+    ? "Trắc nghiệm"
+    : partNames[q.type];
   if (q.solved) {
     $("question-part-badge").textContent += " · đáp án do AI giải";
   }
@@ -1148,9 +1238,31 @@ function showQuestion(i) {
   renderExplainPanel();
   renderChat();
 
-  $("prev-question-btn").disabled = idx === 0;
-  $("next-question-btn").disabled = idx === exam.questions.length - 1;
+  updateNavButtons();
   typeset([content, $("answer-mcq"), $("answer-tf")]);
+
+  // Sau khi nộp bài thi thử / kết thúc trò chơi: tự hiện lời giải nhanh của từng câu khi xem lại
+  if (modeOf(exam) !== "quick" && isFinished(exam)) setTab("quick", true);
+}
+
+function updateNavButtons() {
+  const exam = state.current;
+  const idx = state.idx;
+  const last = exam.questions.length - 1;
+  const playingGame = modeOf(exam) === "game" && !isFinished(exam);
+  const prev = $("prev-question-btn");
+  const next = $("next-question-btn");
+  setHidden(prev, playingGame);
+  prev.disabled = idx === 0;
+  next.disabled = playingGame ? exam.game.times[idx] == null : idx === last;
+  next.textContent = playingGame && idx === last ? "Xem kết quả" : "Câu tiếp";
+}
+
+function onNextClick() {
+  const exam = state.current;
+  if (!exam) return;
+  if (modeOf(exam) === "game" && !isFinished(exam)) gameNext();
+  else showQuestion(state.idx + 1);
 }
 
 function renderAnswerArea() {
@@ -1159,6 +1271,7 @@ function renderAnswerArea() {
   const q = exam.questions[i];
   const ans = exam.answers[i];
   const checked = exam.checked[i];
+  const locked = !canAnswer(exam, i);
 
   const areas = {
     mcq: $("answer-mcq"),
@@ -1186,6 +1299,7 @@ function renderAnswerArea() {
         if (opt.label === q.key) btn.classList.add("correct");
         else if (ans === opt.label) btn.classList.add("wrong");
       }
+      btn.disabled = locked;
       btn.addEventListener("click", () => chooseMcq(opt.label));
       box.appendChild(btn);
     });
@@ -1213,6 +1327,7 @@ function renderAnswerArea() {
           if (q.key[k] === val) b.classList.add("correct");
           else if (ans[k] === val) b.classList.add("wrong");
         }
+        b.disabled = locked;
         b.addEventListener("click", () => chooseTf(k, val));
         btns.appendChild(b);
       });
@@ -1221,30 +1336,30 @@ function renderAnswerArea() {
     });
   } else {
     $("short-answer-input").value = ans || "";
+    $("short-answer-input").disabled = locked;
   }
 }
 
+// Thi thử: chỉ ghi đáp án, chưa chấm. Luyện tập / trò chơi: chấm ngay khi chọn xong.
 function chooseMcq(label) {
   const exam = state.current;
   const i = state.idx;
+  if (!canAnswer(exam, i)) return;
   exam.answers[i] = label;
-  exam.checked[i] = true;
-  saveCurrent();
-  renderAnswerArea();
-  renderNav();
-  renderResult();
+  if (modeOf(exam) !== "mock") exam.checked[i] = true;
+  afterAnswer(i);
   typeset([$("answer-mcq")]);
 }
 
 function chooseTf(k, val) {
   const exam = state.current;
   const i = state.idx;
+  if (!canAnswer(exam, i)) return;
   exam.answers[i][k] = val;
-  exam.checked[i] = exam.answers[i].every((v) => v !== null);
-  saveCurrent();
-  renderAnswerArea();
-  renderNav();
-  renderResult();
+  if (modeOf(exam) !== "mock") {
+    exam.checked[i] = exam.answers[i].every((v) => v !== null);
+  }
+  afterAnswer(i);
   typeset([$("answer-tf")]);
 }
 
@@ -1252,11 +1367,41 @@ function onShortChange(e) {
   const exam = state.current;
   if (!exam) return;
   const i = state.idx;
+  if (!canAnswer(exam, i)) {
+    e.target.value = exam.answers[i] || "";
+    return;
+  }
   exam.answers[i] = e.target.value.trim();
-  exam.checked[i] = exam.answers[i] !== "";
+  if (modeOf(exam) !== "mock") exam.checked[i] = exam.answers[i] !== "";
+  afterAnswer(i);
+}
+
+function afterAnswer(i) {
+  const exam = state.current;
+  const m = modeOf(exam);
+  if (m === "game" && exam.checked[i]) {
+    gameLock(i, false);
+    return;
+  }
+  if (m === "quick") {
+    // đổi đáp án thì lời giải cũ (có nhận xét bài làm) không còn đúng nữa
+    delete state.quick[i];
+    delete state.explain[i];
+  }
   saveCurrent();
+  renderAnswerArea();
   renderNav();
   renderResult();
+  if (m === "quick") {
+    renderExplainPanel();
+    if (exam.checked[i]) {
+      // chọn xong thì AI tự giải nhanh (chờ một chút phòng khi bấm đổi liên tục)
+      clearTimeout(state.autoTimer);
+      state.autoTimer = setTimeout(() => {
+        if (state.current === exam && state.idx === i) setTab("quick", true);
+      }, 400);
+    }
+  }
 }
 
 function renderNav() {
@@ -1281,6 +1426,7 @@ function renderNav() {
       classes.push("is-done");
     }
     btn.className = classes.join(" ");
+    btn.disabled = modeOf(exam) === "game" && !isFinished(exam);
     btn.addEventListener("click", () => showQuestion(i));
     bar.appendChild(btn);
   });
@@ -1295,16 +1441,32 @@ function renderResult() {
   const i = state.idx;
   const q = exam.questions[i];
   const ans = exam.answers[i];
+  const m = modeOf(exam);
+  const panel = $("score-panel");
   const box = $("question-result-status");
-  let text;
 
+  if (m === "game" && !isFinished(exam)) {
+    setHidden(panel, true);
+    return;
+  }
+  if (m === "mock" && !exam.submitted) {
+    const done = exam.questions.filter((x, k) =>
+      isAnswered(x, exam.answers[k]),
+    ).length;
+    box.textContent = `Đã làm ${done}/${exam.questions.length} câu. Điểm và lời giải chỉ hiện sau khi nộp bài.`;
+    $("total-score").textContent = "— / 10";
+    setHidden(panel, false);
+    return;
+  }
+
+  let text;
   if (!exam.checked[i]) {
     text = "Chọn đáp án (hoặc nhập rồi nhấn Enter) để chấm câu này.";
   } else {
     const g = gradeQuestion(q, ans);
     if (g.status === "nokey") {
       text =
-        'Câu này chưa có đáp án chuẩn. Bấm "Xem lời giải câu này" để AI hỗ trợ.';
+        "Câu này chưa có đáp án chuẩn nên chưa được chấm. Hãy xem phần giải nhanh của AI.";
     } else if (g.status === "correct") {
       text = `Chính xác! +${g.earned.toFixed(2)} điểm.`;
     } else if (g.status === "partial") {
@@ -1314,7 +1476,7 @@ function renderResult() {
     }
   }
   box.textContent = text;
-  setHidden($("score-panel"), false);
+  setHidden(panel, false);
   updateTotal();
 }
 
@@ -1339,25 +1501,44 @@ function setTab(name, load = true) {
 function renderExplainPanel() {
   const i = state.idx;
   const essay = $("content-essay");
-  if (state.explain[i]) setMarkdown(essay, state.explain[i]);
-  else setPlain(essay, 'Bấm "Xem lời giải câu này" để AI chữa bài.');
-  setHidden($("quick-warning"), true);
   const quick = $("quick-detail");
+  if (state.explain[i]) setMarkdown(essay, state.explain[i]);
+  else {
+    setPlain(
+      essay,
+      'Bấm "Giải chi tiết từng bước" để AI trình bày lời giải tự luận.',
+    );
+  }
+  setHidden($("quick-warning"), true);
   if (state.quick[i]) setMarkdown(quick, state.quick[i]);
-  else
+  else {
     setPlain(
       quick,
-      'Bấm lại tab "Trắc nghiệm nhanh" để AI gợi ý cách làm nhanh.',
+      "Chọn đáp án để AI giải nhanh (kèm công thức hoặc khái niệm được áp dụng).",
     );
+  }
   // Không tự gọi AI khi chuyển câu: tránh tốn lượt và chờ lâu
   setTab(state.tab, false);
   typeset([essay, quick]);
 }
 
+function explainPayload(exam, i, style) {
+  const q = exam.questions[i];
+  return {
+    question: questionFull(q),
+    answer: answerText(q, exam.answers[i]),
+    key: keyText(q),
+    answered: isAnswered(q, exam.answers[i]),
+    subject: exam.subject,
+    style,
+  };
+}
+
+// Giải nhanh: ngắn gọn, có dẫn công thức / khái niệm áp dụng
 async function loadQuick() {
   const exam = state.current;
+  if (!exam || !aiAllowed(exam)) return;
   const i = state.idx;
-  const q = exam.questions[i];
   const detail = $("quick-detail");
   const warn = $("quick-warning");
 
@@ -1369,46 +1550,46 @@ async function loadQuick() {
   if (state.quickLoading[i]) return;
   state.quickLoading[i] = true;
   setHidden(warn, true);
-  setPlain(detail, "AI đang tìm cách làm nhanh...");
+  setPlain(detail, "AI đang giải nhanh...");
 
-  const r = await postJSON("/api/quick-tip", {
-    question: questionFull(q),
-    subject: exam.subject,
-  });
+  const sig = JSON.stringify(exam.answers[i]);
+  const r = await postJSON(
+    "/api/grade-explain",
+    explainPayload(exam, i, "quick"),
+  );
   state.quickLoading[i] = false;
   if (state.current !== exam) return;
 
+  // Nếu trong lúc chờ học sinh đã đổi đáp án thì bỏ kết quả cũ
+  const stale = JSON.stringify(exam.answers[i]) !== sig;
+  if (r.ok && !stale)
+    state.quick[i] = r.data?.text || "AI không trả về nội dung.";
+  if (state.idx !== i) return;
+  if (stale) return;
   if (r.ok) {
-    state.quick[i] = r.data?.text || "Chưa có mẹo cho câu này.";
-    if (state.idx === i) {
-      setMarkdown(detail, state.quick[i]);
-      typeset([detail]);
-    }
-  } else if (state.idx === i) {
+    setMarkdown(detail, state.quick[i]);
+    typeset([detail]);
+  } else {
     setPlain(detail, "");
     warn.textContent = errorMessage(r);
     setHidden(warn, false);
   }
 }
 
+// Giải chi tiết từng bước (tự luận), chỉ khi học sinh yêu cầu
 async function explainCurrent() {
   const exam = state.current;
-  if (!exam || state.explaining) return;
+  if (!exam || !aiAllowed(exam) || state.explaining) return;
   const i = state.idx;
-  const q = exam.questions[i];
 
   state.explaining = true;
   setTab("essay", false);
-  setPlain($("content-essay"), "AI đang chữa bài...");
+  setPlain($("content-essay"), "AI đang giải chi tiết từng bước...");
 
-  const r = await postJSON("/api/grade-explain", {
-    question: questionFull(q),
-    answer: answerText(q, exam.answers[i]),
-    key: keyText(q),
-    answered: isAnswered(q, exam.answers[i]),
-    subject: exam.subject,
-    mode: "essay",
-  });
+  const r = await postJSON(
+    "/api/grade-explain",
+    explainPayload(exam, i, "detail"),
+  );
   state.explaining = false;
   if (state.current !== exam) return;
 
@@ -1439,7 +1620,7 @@ async function sendChat(e) {
   const input = $("chat-input");
   const message = input.value.trim();
   const exam = state.current;
-  if (!message || !exam || state.chatting) return;
+  if (!message || !exam || state.chatting || !aiAllowed(exam)) return;
 
   const i = state.idx;
   const q = exam.questions[i];
@@ -1545,11 +1726,438 @@ function solveInBackground(exam) {
   });
 }
 
+/* ============ Kiểu làm bài: luyện tập nhanh / thi thử / trò chơi ============ */
+
+function modeOf(exam) {
+  return MODE_LABEL[exam?.mode] ? exam.mode : "quick";
+}
+
+function isFinished(exam) {
+  return modeOf(exam) === "game" ? !!exam.game?.finished : !!exam.submitted;
+}
+
+// AI chỉ hỗ trợ khi luyện tập nhanh, hoặc sau khi đã nộp bài / kết thúc trò chơi
+function aiAllowed(exam) {
+  return modeOf(exam) === "quick" || isFinished(exam);
+}
+
+function canAnswer(exam, i) {
+  const m = modeOf(exam);
+  if (m === "mock") return !exam.submitted;
+  if (m === "game") return !exam.game?.finished && exam.game?.times[i] == null;
+  return true;
+}
+
+function fmtTime(ms) {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+
+/* ---------- Kỷ lục ---------- */
+
+function readRecords() {
+  try {
+    const obj = JSON.parse(localStorage.getItem(RECORD_KEY) || "{}");
+    return obj && typeof obj === "object" ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+// Điểm cao hơn thắng; bằng điểm thì ai làm nhanh hơn thắng
+function cmpRun(a, b) {
+  return b.score10 - a.score10 || a.timeMs - b.timeMs;
+}
+
+function recordKeyOf(exam) {
+  return `${exam.recordKey || exam.id}:${modeOf(exam)}`;
+}
+
+function saveRun(exam, run) {
+  const key = recordKeyOf(exam);
+  const all = readRecords();
+  const list = Array.isArray(all[key]) ? all[key] : [];
+  const prevBest = list.length ? [...list].sort(cmpRun)[0] : null;
+  const isRecord = !prevBest || cmpRun(run, prevBest) < 0;
+  const top = [...list, run].sort(cmpRun).slice(0, 5);
+  all[key] = top;
+  try {
+    localStorage.setItem(RECORD_KEY, JSON.stringify(all));
+  } catch {
+    /* bỏ qua nếu không lưu được */
+  }
+  return { isRecord, prevBest, top };
+}
+
+/* ---------- Thi thử có giờ ---------- */
+
+let autoSubmitId = null;
+
+function startMock(exam) {
+  if (!exam.startedAt) {
+    exam.startedAt = Date.now();
+    exam.endsAt = exam.timeLimitMin
+      ? exam.startedAt + exam.timeLimitMin * 60000
+      : null;
+  }
+}
+
+function updateTimerChip() {
+  const el = $("exam-timer");
+  const exam = state.current;
+  if (!el) return;
+  if (!exam || modeOf(exam) !== "mock" || exam.submitted) {
+    setHidden(el, true);
+    return;
+  }
+  setHidden(el, false);
+  if (exam.endsAt) {
+    const left = exam.endsAt - Date.now();
+    el.textContent = `⏱ ${fmtTime(left)}`;
+    el.classList.toggle("is-warn", left < 5 * 60000);
+  } else {
+    el.textContent = `⏱ ${fmtTime(Date.now() - exam.startedAt)}`;
+    el.classList.remove("is-warn");
+  }
+}
+
+/* ---------- Trò chơi: mỗi câu có giờ ---------- */
+
+function newGame() {
+  return {
+    idx: 0,
+    times: [], // thời gian dùng cho từng câu (ms)
+    points: [],
+    totalPoints: 0,
+    streak: 0,
+    bestStreak: 0,
+    qStart: 0,
+    qEndsAt: 0,
+    limitMs: 0,
+    lastMsg: "",
+    finished: false,
+  };
+}
+
+function questionTimeMs(q) {
+  let sec = GAME_TIME_SEC[q.difficulty] || GAME_TIME_SEC[2];
+  if (q.type !== "mcq") sec = Math.max(sec, 120); // đúng/sai và trả lời ngắn cần nhiều thời gian hơn
+  return Math.min(sec, 300) * 1000; // tối đa 5 phút
+}
+
+function gameBegin(i) {
+  const exam = state.current;
+  const g = exam.game;
+  clearTimeout(state.gameNextTimer);
+  g.idx = i;
+  g.limitMs = questionTimeMs(exam.questions[i]);
+  g.qStart = Date.now();
+  g.qEndsAt = g.qStart + g.limitMs;
+  g.lastMsg = "";
+  showQuestion(i);
+}
+
+function gameLock(i, timedOut) {
+  const exam = state.current;
+  const g = exam?.game;
+  if (!g || g.finished || g.times[i] != null) return;
+  const q = exam.questions[i];
+  const elapsed = Math.min(g.limitMs, Date.now() - g.qStart);
+
+  exam.checked[i] = true;
+  const gr = gradeQuestion(q, exam.answers[i]);
+  const hasKey = gr.status !== "nokey" && gr.max > 0;
+  const ratio = hasKey ? gr.earned / gr.max : 0;
+  const remainFrac = timedOut ? 0 : Math.max(0, 1 - elapsed / g.limitMs);
+
+  // Điểm = đúng bao nhiêu × (100 + tối đa 100 điểm thưởng tốc độ) + thưởng chuỗi đúng
+  let pts = ratio > 0 ? Math.round(ratio * (100 + 100 * remainFrac)) : 0;
+  if (ratio === 1) {
+    g.streak += 1;
+    pts += Math.min(g.streak - 1, 5) * 10;
+  } else if (hasKey) {
+    g.streak = 0;
+  }
+  g.bestStreak = Math.max(g.bestStreak, g.streak);
+  g.times[i] = timedOut ? g.limitMs : elapsed;
+  g.points[i] = pts;
+  g.totalPoints += pts;
+
+  if (!hasKey) g.lastMsg = "Câu này chưa có đáp án nên không tính điểm.";
+  else if (gr.status === "correct") g.lastMsg = `✅ Chính xác! +${pts} điểm`;
+  else if (gr.status === "partial") {
+    g.lastMsg = `⚠️ Đúng ${gr.c}/4 ý, +${pts} điểm. Đáp án: ${keyText(q)}`;
+  } else if (timedOut) g.lastMsg = `⏰ Hết giờ! Đáp án: ${keyText(q)}`;
+  else g.lastMsg = `❌ Chưa đúng. Đáp án: ${keyText(q)}`;
+
+  saveCurrent();
+  renderAnswerArea();
+  renderNav();
+  updateGameBar();
+  updateNavButtons();
+  typeset([$("answer-mcq"), $("answer-tf"), $("game-feedback")]);
+
+  clearTimeout(state.gameNextTimer);
+  const wait = ratio === 1 ? GAME_NEXT_DELAY_MS : GAME_NEXT_DELAY_MS + 1500;
+  state.gameNextTimer = setTimeout(gameNext, wait);
+}
+
+function gameNext() {
+  const exam = state.current;
+  if (!exam || modeOf(exam) !== "game" || exam.game.finished) return;
+  clearTimeout(state.gameNextTimer);
+  const i = exam.game.idx;
+  if (exam.game.times[i] == null) return; // chưa chốt câu hiện tại
+  if (i >= exam.questions.length - 1) finishGame();
+  else gameBegin(i + 1);
+}
+
+function finishGame() {
+  const exam = state.current;
+  const g = exam.game;
+  clearTimeout(state.gameNextTimer);
+  exam.questions.forEach((q, i) => {
+    exam.checked[i] = true;
+    if (g.times[i] == null) g.times[i] = 0;
+    if (g.points[i] == null) g.points[i] = 0;
+  });
+  g.finished = true;
+  g.finishedAt = Date.now();
+
+  const timeMs = g.times.reduce((n, t) => n + (t || 0), 0);
+  const { earned, max } = totals();
+  const score10 = max ? Math.round((earned / max) * 1000) / 100 : 0;
+  const rec = saveRun(exam, {
+    score10,
+    timeMs,
+    points: g.totalPoints,
+    at: Date.now(),
+  });
+  exam.result = {
+    score10,
+    timeMs,
+    points: g.totalPoints,
+    bestStreak: g.bestStreak,
+    isRecord: rec.isRecord,
+    prevBest: rec.prevBest,
+    top: rec.top,
+  };
+  saveCurrent(true);
+  showQuestion(0);
+}
+
+function updateGameBar() {
+  const exam = state.current;
+  const bar = $("game-bar");
+  if (!bar) return;
+  const show = exam && modeOf(exam) === "game" && !exam.game.finished;
+  setHidden(bar, !show);
+  if (!show) return;
+
+  const g = exam.game;
+  const q = exam.questions[g.idx];
+  const locked = g.times[g.idx] != null;
+  const remain = locked
+    ? Math.max(0, g.limitMs - g.times[g.idx])
+    : Math.max(0, g.qEndsAt - Date.now());
+  const frac = g.limitMs ? remain / g.limitMs : 0;
+
+  $("game-q-time").textContent = fmtTime(remain);
+  $("game-q-time").classList.toggle(
+    "is-warn",
+    !locked && (frac < 0.2 || remain < 10000),
+  );
+  $("game-diff").textContent =
+    `${DIFF_LABEL[q.difficulty] || "Vừa"} · tối đa ${fmtTime(g.limitMs)}`;
+  $("game-score").textContent = `⭐ ${g.totalPoints}`;
+  $("game-streak").textContent = g.streak >= 2 ? `🔥 ${g.streak}` : "";
+  $("game-progress-fill").style.width = `${Math.round(frac * 100)}%`;
+  $("game-progress-fill").classList.toggle("is-warn", !locked && frac < 0.2);
+  $("game-feedback").textContent = locked ? g.lastMsg || "" : "";
+}
+
+/* ---------- Đồng hồ chung ---------- */
+
+function tick() {
+  const exam = state.current;
+  const view = $("exam-view");
+  if (!exam || !view || view.classList.contains("hidden")) return;
+  const m = modeOf(exam);
+  if (m === "mock" && !exam.submitted) {
+    updateTimerChip();
+    if (exam.endsAt && Date.now() >= exam.endsAt && autoSubmitId !== exam.id) {
+      autoSubmitId = exam.id;
+      toast("Hết giờ! Bài làm được nộp tự động.", "warn");
+      submitExam({ auto: true });
+    }
+  } else if (m === "game" && !exam.game.finished) {
+    const i = exam.game.idx;
+    if (exam.game.times[i] == null) {
+      if (Date.now() >= exam.game.qEndsAt) gameLock(i, true);
+      else updateGameBar();
+    }
+  }
+}
+
+/* ---------- Giao diện theo kiểu làm bài ---------- */
+
+function applyModeUI(exam) {
+  const m = modeOf(exam);
+  const finished = isFinished(exam);
+  const playingGame = m === "game" && !finished;
+  const ai = aiAllowed(exam);
+
+  setHidden($("explanation-panel"), !ai);
+  setHidden($("chat-panel"), !ai);
+  setHidden($("score-panel"), playingGame);
+  setHidden($("share-exam-btn"), m !== "quick" && !finished);
+
+  const submit = $("submit-exam-btn");
+  submit.textContent = playingGame ? "Kết thúc" : "Nộp bài";
+  setHidden(submit, m !== "quick" && finished);
+
+  const badge = $("exam-mode-badge");
+  if (badge) badge.textContent = MODE_LABEL[m];
+
+  renderSummary(exam);
+  updateTimerChip();
+  updateGameBar();
+}
+
+function renderSummary(exam) {
+  const box = $("summary-panel");
+  if (!box) return;
+  const m = modeOf(exam);
+  if (!isFinished(exam) || !exam.result) {
+    box.replaceChildren();
+    setHidden(box, true);
+    return;
+  }
+  const r = exam.result;
+  let right = 0;
+  let wrong = 0;
+  let skipped = 0;
+  let nokey = 0;
+  exam.questions.forEach((q, i) => {
+    const answered = isAnswered(q, exam.answers[i]);
+    const g = gradeQuestion(q, exam.answers[i]);
+    if (!answered) skipped++;
+    if (g.status === "nokey") nokey++;
+    else if (g.status === "correct") right++;
+    else if (answered) wrong++;
+  });
+
+  const title =
+    m === "game"
+      ? "🏁 Hoàn thành trò chơi"
+      : m === "mock"
+        ? "📝 Kết quả thi thử"
+        : "📊 Kết quả luyện tập";
+  const stat = (v, label) =>
+    `<div class="sum-stat"><b>${v}</b><span>${label}</span></div>`;
+
+  let html = `<details class="summary-card" open><summary>${title}</summary>`;
+  html += `<div class="summary-score">${Number(r.score10).toFixed(2)}<small> / 10</small></div>`;
+  html += `<div class="summary-stats">${stat(right, "đúng")}${stat(wrong, "sai")}${stat(skipped, "chưa làm")}${
+    m !== "quick" ? stat(fmtTime(r.timeMs), "thời gian") : ""
+  }</div>`;
+  if (m === "game") {
+    html += `<div class="summary-line">⭐ ${r.points} điểm · 🔥 chuỗi đúng dài nhất: ${r.bestStreak}</div>`;
+  }
+  if (m !== "quick") {
+    const best = r.top?.[0];
+    if (r.isRecord) {
+      html += `<div class="record-box is-new">🏆 Kỷ lục mới!${
+        r.prevBest
+          ? ` (kỷ lục cũ: ${Number(r.prevBest.score10).toFixed(2)}đ · ${fmtTime(r.prevBest.timeMs)})`
+          : ""
+      }</div>`;
+    } else if (best) {
+      html += `<div class="record-box">🏅 Kỷ lục hiện tại: ${Number(best.score10).toFixed(2)}đ · ${fmtTime(best.timeMs)}</div>`;
+    }
+    if (r.top?.length) {
+      html += `<ol class="record-list">${r.top
+        .map(
+          (x) =>
+            `<li>${Number(x.score10).toFixed(2)}đ · ${fmtTime(x.timeMs)} · ${new Date(x.at).toLocaleDateString("vi-VN")}</li>`,
+        )
+        .join("")}</ol>`;
+    }
+  }
+  if (nokey) {
+    html += `<div class="summary-note">${nokey} câu chưa có đáp án nên không tính điểm.</div>`;
+  }
+  html += `<div class="summary-actions"><button type="button" class="btn btn-sm btn-primary" id="summary-retry">Làm lại</button>${
+    m !== "quick"
+      ? '<button type="button" class="btn btn-sm btn-outline" id="summary-practice">Luyện tập lại cùng AI</button>'
+      : ""
+  }</div></details>`;
+  box.innerHTML = html;
+  setHidden(box, false);
+  box
+    .querySelector("#summary-retry")
+    ?.addEventListener("click", () => restartExam());
+  box
+    .querySelector("#summary-practice")
+    ?.addEventListener("click", () => restartExam("quick"));
+}
+
+// Làm lại cùng đề (có thể đổi sang kiểu làm bài khác)
+function restartExam(newMode) {
+  const old = state.current;
+  if (!old) return;
+  const mode = newMode || modeOf(old);
+  openExam({
+    ...old,
+    id: makeId(),
+    mode,
+    timeLimitMin:
+      mode === "mock" ? (modeOf(old) === "mock" ? old.timeLimitMin : 60) : 0,
+    createdAt: Date.now(),
+    answers: old.questions.map(initialAnswer),
+    checked: old.questions.map(() => false),
+    submitted: false,
+    result: null,
+    game: null,
+    startedAt: null,
+    endsAt: null,
+    finishedAt: null,
+  });
+}
+
 let submitting = false;
 
-async function submitExam() {
+async function submitExam(opts = {}) {
   const exam = state.current;
   if (!exam || submitting) return;
+  const m = modeOf(exam);
+
+  if (m === "game") {
+    if (exam.game.finished) return;
+    if (
+      !opts.auto &&
+      !window.confirm(
+        "Kết thúc trò chơi ngay? Các câu chưa làm sẽ tính là sai.",
+      )
+    ) {
+      return;
+    }
+    finishGame();
+    return;
+  }
+
+  const left = exam.questions.filter(
+    (q, i) => !isAnswered(q, exam.answers[i]),
+  ).length;
+  if (
+    !opts.auto &&
+    m === "mock" &&
+    left &&
+    !window.confirm(`Còn ${left} câu chưa làm. Bạn chắc chắn muốn nộp bài?`)
+  ) {
+    return;
+  }
+
   submitting = true;
   try {
     const needSolve =
@@ -1564,16 +2172,33 @@ async function submitExam() {
     if (state.current !== exam) return;
 
     exam.checked = exam.questions.map(() => true);
+    exam.submitted = true;
+    exam.finishedAt = Date.now();
+
+    const { earned, max } = totals();
+    const score10 = max ? Math.round((earned / max) * 1000) / 100 : 0;
+    let timeMs = 0;
+    if (m === "mock" && exam.startedAt) {
+      timeMs = exam.finishedAt - exam.startedAt;
+      if (exam.endsAt) timeMs = Math.min(timeMs, exam.timeLimitMin * 60000);
+    }
+    exam.result = { score10, timeMs, isRecord: false };
+    if (m === "mock") {
+      const rec = saveRun(exam, { score10, timeMs, at: Date.now() });
+      Object.assign(exam.result, {
+        isRecord: rec.isRecord,
+        prevBest: rec.prevBest,
+        top: rec.top,
+      });
+    }
     saveCurrent(true);
     showQuestion(state.idx);
 
-    const { earned, max } = totals();
-    const score = max ? (earned / max) * 10 : 0;
     const noKey = exam.questions.filter(
       (q) => q.key === null || q.key === undefined,
     ).length;
     const aiSolved = exam.questions.filter((q) => q.solved).length;
-    let msg = `Đã nộp bài: ${score.toFixed(2)}/10`;
+    let msg = `Đã nộp bài: ${score10.toFixed(2)}/10`;
     if (aiSolved)
       msg += `. ${aiSolved} câu chấm theo đáp án do AI giải (tham khảo)`;
     if (noKey) msg += `. ${noKey} câu chưa có đáp án nên không tính điểm`;
@@ -1646,6 +2271,7 @@ function openSharedFromHash() {
 /* ============ Điều hướng & giao diện ============ */
 
 function goHome() {
+  clearTimeout(state.gameNextTimer);
   if (saveTimer) saveCurrent(true);
   setHidden($("exam-view"), true);
   $("exam-view").classList.remove("active");
@@ -1694,8 +2320,8 @@ function init() {
   on("create-exam-btn", "click", createExam);
   on("back-home-btn", "click", goHome);
   on("prev-question-btn", "click", () => showQuestion(state.idx - 1));
-  on("next-question-btn", "click", () => showQuestion(state.idx + 1));
-  on("submit-exam-btn", "click", submitExam);
+  on("next-question-btn", "click", onNextClick);
+  on("submit-exam-btn", "click", () => submitExam());
   on("share-exam-btn", "click", shareExam);
   on("explain-current-btn", "click", explainCurrent);
   on("tab-essay", "click", () => setTab("essay"));
@@ -1703,8 +2329,30 @@ function init() {
   on("chat-form", "submit", sendChat);
   on("short-answer-input", "change", onShortChange);
 
+  // Ẩn/hiện các tùy chọn ở trang chủ theo kiểu làm bài và chế độ xử lý
+  document
+    .querySelectorAll(
+      'input[name="play-mode"], input[name="process-mode"], input[name="exam-format"]',
+    )
+    .forEach((el) => el.addEventListener("change", syncHomeOptions));
+  syncHomeOptions();
+
+  setInterval(tick, 500); // đồng hồ thi thử và trò chơi
+
   renderRecent();
   openSharedFromHash();
+}
+
+function syncHomeOptions() {
+  const val = (name) =>
+    document.querySelector(`input[name="${name}"]:checked`)?.value;
+  const gen = val("process-mode") === "generate";
+  setHidden($("mock-time-item"), val("play-mode") !== "mock");
+  setHidden($("gen-structure-item"), !gen);
+  setHidden(
+    $("short-count-wrap"),
+    !(gen && val("exam-format") === "short-mcq"),
+  );
 }
 
 init();

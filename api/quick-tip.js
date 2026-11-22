@@ -1,5 +1,7 @@
 import { askAI, parseBody, clip, sendAIError } from "../lib/ai.js";
 
+export const config = { maxDuration: 60 }; // cho phép hàm chạy tới 60 giây (mặc định có thể chỉ 10 giây → lỗi 504)
+
 const SYSTEM =
   "Bạn là gia sư luyện thi THPT. Đưa cách làm NHANH cho câu trắc nghiệm bằng tiếng Việt, tối đa khoảng 10 dòng gồm: " +
   "(1) công thức nhớ nhanh, nêu rõ điều kiện áp dụng; (2) mẹo loại trừ hoặc thử đáp án; (3) cách bấm máy Casio nếu phù hợp. " +

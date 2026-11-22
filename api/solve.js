@@ -1,6 +1,8 @@
 // api/solve.js — AI tự giải các câu chưa có đáp án chuẩn (để nộp bài vẫn chấm điểm được)
 import { askAI, parseBody, clip, sendAIError } from "../lib/ai.js";
 
+export const config = { maxDuration: 60 }; // cho phép hàm chạy tới 60 giây (mặc định có thể chỉ 10 giây → lỗi 504)
+
 const SYSTEM =
   "Bạn là giáo viên giỏi, giải chính xác câu hỏi luyện thi THPT Việt Nam. " +
   "Với mỗi câu, hãy giải cẩn thận từng bước trong đầu rồi chỉ trả về đáp án cuối cùng. " +

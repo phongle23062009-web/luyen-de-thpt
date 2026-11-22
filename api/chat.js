@@ -1,8 +1,10 @@
 import { askAI, parseBody, clip, sendAIError } from "../lib/ai.js";
 
+export const config = { maxDuration: 60 }; // cho phép hàm chạy tới 60 giây (mặc định có thể chỉ 10 giây → lỗi 504)
+
 const SYSTEM =
   "Bạn là trợ giảng luyện thi THPT thân thiện, chính xác. Bám sát ngữ cảnh câu hỏi bên dưới khi trả lời học sinh. " +
-  "Trả lời ngắn gọn bằng tiếng Việt (tối đa khoảng 12 dòng). Nếu ngữ cảnh ghi học sinh chưa làm câu này thì chỉ hướng dẫn, không suy diễn rằng em không biết làm. Có thể dùng Markdown nhẹ (**in đậm**, gạch đầu dòng), không dùng bảng. " +
+  "Mặc định trả lời NGẮN GỌN bằng tiếng Việt (tối đa khoảng 8 dòng) và dẫn công thức hoặc khái niệm/định nghĩa liên quan; chỉ giải từng bước chi tiết khi học sinh yêu cầu (ví dụ: giải chi tiết, tự luận, từng bước). Nếu ngữ cảnh ghi học sinh chưa làm câu này thì chỉ hướng dẫn, không suy diễn rằng em không biết làm. Có thể dùng Markdown nhẹ (**in đậm**, gạch đầu dòng), không dùng bảng. " +
   "Công thức viết trong $...$ hoặc $$...$$; công thức hóa học dùng \\mathrm, ví dụ $\\mathrm{C_4H_6}$. " +
   "Nếu đáp án chuẩn trong ngữ cảnh có vẻ sai, nói rõ lý do thay vì làm theo.";
 
