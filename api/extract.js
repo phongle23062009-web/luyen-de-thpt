@@ -227,7 +227,15 @@ function salvageQuestions(text) {
 
 /* ===================== Prompt ===================== */
 
-function buildPrompt({ text, subject, format, mode, counts, imageCount }) {
+function buildPrompt({
+  text,
+  subject,
+  format,
+  mode,
+  counts,
+  imageCount,
+  contextPage,
+}) {
   const safeSubject = subject || "Tổng hợp THPT";
   const isShort = format === "short";
   const isGen = mode === "gen";
@@ -257,6 +265,9 @@ function buildPrompt({ text, subject, format, mode, counts, imageCount }) {
     imageCount > 0
       ? `Có ${imageCount} trang ảnh đính kèm, đánh số từ 0 đến ${imageCount - 1}.`
       : "Không có ảnh đính kèm.",
+    contextPage && imageCount > 1
+      ? 'QUAN TRỌNG: ảnh 0 là TRANG CHÍNH, ảnh 1 chỉ là trang kế tiếp để đọc phần còn lại của câu bị ngắt giữa hai trang (ví dụ đề bài ở cuối trang 0, các phương án A–D, các ý a–d hoặc hình nằm ở đầu trang 1). Chỉ lấy các câu BẮT ĐẦU (có chữ "Câu N" hoặc "Bài N") ở trang 0, kể cả khi phần còn lại của câu nằm ở trang 1. KHÔNG lấy câu bắt đầu ở trang 1. Bỏ qua phần ở đầu trang 0 nếu nó là phần tiếp theo của câu từ trang trước (không có chữ mở đầu câu). Với figure.page: 0 là trang chính, 1 là trang kế tiếp.'
+      : "",
     countLine,
     text ? `Văn bản bổ sung từ người dùng:\n${text}` : "",
     "",
@@ -298,7 +309,7 @@ function buildPrompt({ text, subject, format, mode, counts, imageCount }) {
     `${isGen ? "4" : "5"}. ĐÁP ÁN (trường answer, luôn là chuỗi): mcq = một chữ cái A/B/C/D; tf = bốn giá trị true/false theo thứ tự a,b,c,d ngăn cách bởi dấu phẩy (ví dụ "true,false,true,false"); short = số dùng dấu chấm thập phân (ví dụ 12.5) hoặc chữ ngắn. Ưu tiên đáp án có trong tài liệu; nếu không có thì TỰ GIẢI cẩn thận từng bước rồi mới chọn; chỉ ghi null khi thật sự không xác định được.`,
     `${isGen ? "5" : "6"}. solved = true khi đáp án do bạn tự giải hoặc phương án nhiễu do bạn tự tạo; solved = false khi câu hỏi và đáp án lấy nguyên từ tài liệu.`,
     `${isGen ? "6" : "7"}. Công thức toán, lý, hóa đặt trong $...$ (ví dụ $\\frac{1}{2}$; hóa học: $\\mathrm{CH_3NH_2}$, $\\mathrm{H_2SO_4}$). Trong chuỗi JSON, mọi dấu gạch chéo ngược phải viết thành hai dấu \\\\.`,
-    `${isGen ? "7" : "8"}. HÌNH MINH HỌA: nếu câu có hình đi kèm (công thức cấu tạo, đồ thị, hình học, sơ đồ, thí nghiệm, bảng dạng ảnh) nằm dưới hoặc bên cạnh câu hỏi, hoặc các lựa chọn là hình vẽ, hãy đặt figure = {"page": số trang, "box": [ymin, xmin, ymax, xmax]} với tọa độ nguyên 0–1000 (gốc ở góc trên trái của trang, ymin/ymax theo chiều cao, xmin/xmax theo chiều rộng). Box chỉ bao phần hình (chừa lề nhỏ), không bao chữ của câu hỏi. Chữ của câu vẫn phải gõ đầy đủ trong prompt, giữ cả lời dẫn như "có công thức như sau" hoặc "như hình vẽ". Câu không có hình thì figure = null. BẮT BUỘC: câu nhắc "như hình vẽ", "hình bên", "đồ thị", "sơ đồ", "hình sau" hoặc có phương án là hình thì figure KHÔNG được để null.`,
+    `${isGen ? "7" : "8"}. HÌNH MINH HỌA: nếu câu có hình đi kèm (công thức cấu tạo, đồ thị, hình học, sơ đồ, thí nghiệm, bảng dạng ảnh) nằm dưới hoặc bên cạnh câu hỏi, hoặc các lựa chọn là hình vẽ, hãy đặt figure = {"page": số trang, "box": [ymin, xmin, ymax, xmax]} với tọa độ nguyên 0–1000 (gốc ở góc trên trái của trang, ymin/ymax theo chiều cao, xmin/xmax theo chiều rộng). Box chỉ bao phần hình (chừa lề nhỏ), không bao chữ của câu hỏi. Chữ của câu vẫn phải gõ đầy đủ trong prompt, giữ cả lời dẫn như "có công thức như sau" hoặc "như hình vẽ". Câu không có hình thì figure = null. Nếu các phương án A–D là hình vẽ (đồ thị, sơ đồ, hình học...) thì vẫn là mcq với options = {"A":"Hình A","B":"Hình B","C":"Hình C","D":"Hình D"} và figure là khung bao CẢ bốn hình cùng nhãn A, B, C, D; nếu một ý a–d của câu đúng/sai là hình thì ghi "Xem hình" cho ý đó. BẮT BUỘC: câu nhắc "như hình vẽ", "hình bên", "đồ thị", "sơ đồ", "hình sau" hoặc có phương án là hình thì figure KHÔNG được để null.`,
     `${isGen ? "8" : "9"}. Chỉ trả về MỘT đối tượng JSON thuần túy, không lời dẫn, không markdown.`,
     "",
     "Mẫu JSON (chỉ là ví dụ về cấu trúc):",
@@ -518,6 +529,7 @@ export default async function handler(req, res) {
   const subject = typeof body.subject === "string" ? body.subject : "";
   const format = body.format === "short" ? "short" : "thpt";
   const mode = body.mode === "gen" ? "gen" : "extract";
+  const contextPage = mode === "extract" && body.contextPage === true;
   const counts =
     body.counts && typeof body.counts === "object" ? body.counts : {};
 
@@ -536,6 +548,7 @@ export default async function handler(req, res) {
     mode,
     counts,
     imageCount: parsedImages.length,
+    contextPage,
   });
   const parts = parsedImages.map((img) => ({
     inlineData: { mimeType: img.mimeType, data: img.data },

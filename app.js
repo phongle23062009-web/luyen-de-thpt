@@ -593,7 +593,7 @@ function normalizeKey(q, type) {
 
 // Câu nhắc tới hình/đồ thị/sơ đồ nên cần có hình đi kèm
 function needsFigure(text) {
-  return /(hình vẽ|như hình|hình bên|hình sau|hình dưới|đồ thị|sơ đồ|biểu đồ|bảng sau)/i.test(
+  return /(hình vẽ|như hình|hình bên|hình sau|hình dưới|đồ thị|sơ đồ|biểu đồ|bảng sau|(đường|hình|đồ thị|sơ đồ|biểu đồ) nào)/i.test(
     text,
   );
 }
@@ -620,9 +620,19 @@ function buildQuestions(data, format, pages, allowPageFallback = true) {
     if (!text) return;
 
     // Câu có lựa chọn thì luôn coi là trắc nghiệm; câu "mcq" thiếu lựa chọn thì chuyển thành trả lời ngắn
-    const opts = normalizeOptions(q.options);
+    let opts = normalizeOptions(q.options);
     if (type !== "tf" && opts.length >= 2) type = "mcq";
-    else if (type === "mcq") type = "short";
+    else if (type === "mcq") {
+      // Phương án là hình vẽ (không có chữ): giữ trắc nghiệm A–D, các hình nằm trong ảnh minh họa
+      if ((q.figure && typeof q.figure === "object") || needsFigure(text)) {
+        opts = ["A", "B", "C", "D"].map((l) => ({
+          label: l,
+          text: `Hình ${l}`,
+        }));
+      } else {
+        type = "short";
+      }
+    }
     // Định dạng "Trắc nghiệm ngắn" chỉ nhận câu có lựa chọn
     if (format === "short" && type !== "mcq") return;
 
@@ -737,8 +747,17 @@ async function createExam() {
         EXTRACT_CONCURRENCY,
         async (i) => {
           const page = jobs[i];
+          // Gửi kèm trang kế tiếp (chỉ để đọc phần bị ngắt sang trang sau: phương án, ý a–d, hình)
+          const at = page ? state.pages.indexOf(page) : -1;
+          const next = at >= 0 ? state.pages[at + 1] : null;
           const r = await postJSON("/api/extract", {
-            images: page ? [compressCanvas(page.canvas)] : [],
+            images: page
+              ? [
+                  compressCanvas(page.canvas),
+                  ...(next ? [compressCanvas(next.canvas)] : []),
+                ]
+              : [],
+            contextPage: !!next,
             text: i === 0 ? text : "",
             subject: subjectLabel,
             mode,
@@ -754,11 +773,33 @@ async function createExam() {
           }
           if (r.data?._partial) partialPages.push(i + 1);
           // Mỗi yêu cầu chỉ có 1 trang nên figure.page luôn là 0 → dùng đúng trang đó
-          results[i] = buildQuestions(r.data, format, page ? [page] : []);
+          results[i] = buildQuestions(
+            r.data,
+            format,
+            page ? (next ? [page, next] : [page]) : [],
+          );
         },
       );
       failedPages.sort((a, b) => a - b);
-      questions = results.flat().filter(Boolean);
+      // Loại câu trùng (phòng khi AI lấy luôn câu ở trang kế tiếp)
+      const seen = new Set();
+      questions = results
+        .flat()
+        .filter(Boolean)
+        .filter((q) => {
+          const k = [
+            q.type,
+            q.text,
+            ...(q.options || []).map((o) => o.text),
+            ...(q.statements || []).map((o) => o.text),
+          ]
+            .join("|")
+            .replace(/\s+/g, " ")
+            .toLowerCase();
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
       questions = mergeAndRenumber(questions);
     }
   } finally {
