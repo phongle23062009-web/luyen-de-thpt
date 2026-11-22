@@ -6,6 +6,7 @@ const MAX_SEND = 8; // tối đa số trang chọn cùng lúc (chế độ tạo
 const RECENT_KEY = "recent_exams";
 const RECENT_LIMIT = 5;
 const LAYOUT_KEY = "layout_mode";
+const EXTRACT_CONCURRENCY = 3; // số trang đọc song song (free tier chịu được 2–3)
 
 // Số câu theo cấu trúc đề THPT (Phần I / II / III)
 const SUBJECT_COUNTS = {
@@ -34,6 +35,7 @@ const state = {
   extracting: false,
   explaining: false,
   chatting: false,
+  quickLoading: {}, // câu đang chờ mẹo nhanh
 };
 
 /* ============ Tiện ích DOM ============ */
@@ -86,18 +88,139 @@ function makeId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
+/* ============ Hiển thị Markdown của AI (không còn ký tự ** thừa) ============ */
+
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Chuyển Markdown cơ bản (đậm, nghiêng, code, tiêu đề, danh sách) sang HTML an toàn.
+// Công thức $...$, $$...$$, \(...\), \[...\] được giữ nguyên cho MathJax.
+function renderMarkdown(src) {
+  const math = [];
+  let s = String(src ?? "").replace(/\r\n?/g, "\n");
+  s = s.replace(
+    /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$(?!\s)[^$\n]+?\$/g,
+    (m) => {
+      math.push(m);
+      return `\uE000${math.length - 1}\uE001`;
+    },
+  );
+  s = escapeHtml(s);
+
+  const inline = (t) =>
+    t
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*\n]+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/__([^_\n]+?)__/g, "<strong>$1</strong>")
+      .replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?!\*)/g, "$1<em>$2</em>");
+
+  const out = [];
+  let list = null;
+  let para = [];
+  const flushPara = () => {
+    if (para.length) {
+      out.push(`<p>${inline(para.join("<br>"))}</p>`);
+      para = [];
+    }
+  };
+  const closeList = () => {
+    if (list) {
+      out.push(`</${list}>`);
+      list = null;
+    }
+  };
+  const openList = (kind) => {
+    if (list !== kind) {
+      closeList();
+      out.push(`<${kind}>`);
+      list = kind;
+    }
+  };
+
+  for (const raw of s.split("\n")) {
+    const line = raw.trimEnd();
+    let m;
+    if (!line.trim()) {
+      flushPara();
+      closeList();
+    } else if ((m = line.match(/^\s{0,3}#{1,6}\s+(.*)$/))) {
+      flushPara();
+      closeList();
+      out.push(`<h4>${inline(m[1])}</h4>`);
+    } else if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) {
+      flushPara();
+      closeList();
+      out.push("<hr>");
+    } else if ((m = line.match(/^\s*[-*•]\s+(.*)$/))) {
+      flushPara();
+      openList("ul");
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+      flushPara();
+      openList("ol");
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else {
+      closeList();
+      para.push(line.trim());
+    }
+  }
+  flushPara();
+  closeList();
+
+  return out
+    .join("")
+    .replace(/\uE000(\d+)\uE001/g, (_, n) => escapeHtml(math[Number(n)]));
+}
+
+function setMarkdown(el, text) {
+  el.style.whiteSpace = "normal";
+  el.classList.add("md");
+  el.innerHTML = renderMarkdown(text);
+}
+
+function setPlain(el, text) {
+  el.classList.remove("md");
+  el.style.whiteSpace = "";
+  el.textContent = text;
+}
+
+// Chạy fn(item, index) với tối đa `limit` việc song song
+async function runPool(items, limit, fn) {
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (next < items.length) {
+        const k = next++;
+        await fn(items[k], k);
+      }
+    },
+  );
+  await Promise.all(workers);
+}
+
 /* ============ Gọi API ============ */
 
-async function postJSON(url, body) {
+async function postJSON(url, body, timeoutMs = 100000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res;
   try {
     res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: ctrl.signal,
     });
   } catch (err) {
-    return { ok: false, error: "network", message: err.message };
+    return {
+      ok: false,
+      error: err.name === "AbortError" ? "timeout" : "network",
+      message: err.message,
+    };
+  } finally {
+    clearTimeout(timer);
   }
   let data = null;
   try {
@@ -122,6 +245,10 @@ function errorMessage(r) {
     invalid_json: "AI trả về chưa đúng định dạng, thử lại với ít trang hơn",
     empty_input: "Chưa có ảnh hoặc văn bản để xử lý",
     network: "Không kết nối được máy chủ",
+    timeout: "AI trả lời quá lâu, hãy thử lại hoặc chọn ít trang hơn",
+    ai_failed: "AI đang bận hoặc đã hết lượt miễn phí, hãy thử lại sau ít phút",
+    http_429: "AI đang bị giới hạn lượt gọi, hãy đợi một chút rồi thử lại",
+    http_503: "AI đang quá tải, hãy thử lại sau ít phút",
     http_413: "Dữ liệu quá lớn, hãy chọn ít trang hơn",
     http_404:
       "Không tìm thấy API, kiểm tra thư mục api/ đã được đẩy lên GitHub",
@@ -421,8 +548,9 @@ function toBool(v) {
   if (typeof v === "boolean") return v;
   if (typeof v === "string") {
     const s = v.trim().toLowerCase();
-    if (["true", "đúng", "dung", "d", "t", "yes"].includes(s)) return true;
-    if (["false", "sai", "s", "f", "no"].includes(s)) return false;
+    if (["true", "đúng", "dung", "d", "đ", "t", "yes", "1"].includes(s))
+      return true;
+    if (["false", "sai", "s", "f", "no", "0"].includes(s)) return false;
   }
   return null;
 }
@@ -432,8 +560,10 @@ function normalizeKey(q, type) {
   if (raw === null || raw === undefined || raw === "") return null;
 
   if (type === "mcq") {
-    const letter = String(raw).trim().toUpperCase().charAt(0);
-    return /^[ABCD]$/.test(letter) ? letter : null;
+    // Chấp nhận "B", "B.", "Đáp án: B", "câu B"... (trước đây "Đáp án B" bị coi là không có đáp án)
+    const up = String(raw).trim().toUpperCase();
+    const m = up.match(/(?:^|[^A-ZÀ-Ỹ])([ABCD])(?![A-ZÀ-Ỹ])/);
+    return m ? m[1] : null;
   }
   if (type === "tf") {
     const labels = ["a", "b", "c", "d"];
@@ -542,6 +672,7 @@ async function createExam() {
   state.extracting = true;
   let questions = [];
   const failedPages = [];
+  const partialPages = [];
   let lastError = null;
 
   try {
@@ -557,32 +688,44 @@ async function createExam() {
         counts: totalCounts,
       });
       if (r.ok) {
+        if (r.data?._partial) partialPages.push(0);
         questions = mergeAndRenumber(buildQuestions(r.data, format, selected));
       } else {
         lastError = r;
       }
     } else {
-      // Tách đề có sẵn: gửi TỪNG trang để AI đọc kỹ và không bỏ sót câu
+      // Tách đề có sẵn: mỗi trang một yêu cầu, chạy song song tối đa 3 trang (nhanh gấp ~2–3 lần)
       const jobs = selected.length ? selected : [null];
-      for (let i = 0; i < jobs.length; i++) {
-        const page = jobs[i];
-        setLoading(true, `Đang đọc trang ${i + 1}/${jobs.length}...`);
-        const r = await postJSON("/api/extract", {
-          images: page ? [compressCanvas(page.canvas)] : [],
-          text: i === 0 ? text : "",
-          subject: subjectLabel,
-          mode,
-          format,
-          counts: { p1: 0, p2: 0, p3: 0 }, // AI tự lấy hết câu trên trang
-        });
-        if (!r.ok) {
-          failedPages.push(i + 1);
-          lastError = r;
-          continue;
-        }
-        // Mỗi yêu cầu chỉ có 1 trang nên figure.page luôn là 0 → dùng đúng trang đó
-        questions.push(...buildQuestions(r.data, format, page ? [page] : []));
-      }
+      const results = new Array(jobs.length).fill(null);
+      let done = 0;
+      setLoading(true, `Đang đọc ${jobs.length} trang...`);
+      await runPool(
+        jobs.map((_, i) => i),
+        EXTRACT_CONCURRENCY,
+        async (i) => {
+          const page = jobs[i];
+          const r = await postJSON("/api/extract", {
+            images: page ? [compressCanvas(page.canvas)] : [],
+            text: i === 0 ? text : "",
+            subject: subjectLabel,
+            mode,
+            format,
+            counts: { p1: 0, p2: 0, p3: 0 }, // AI tự lấy hết câu trên trang
+          });
+          done++;
+          setLoading(true, `Đã đọc ${done}/${jobs.length} trang...`);
+          if (!r.ok) {
+            failedPages.push(i + 1);
+            lastError = r;
+            return;
+          }
+          if (r.data?._partial) partialPages.push(i + 1);
+          // Mỗi yêu cầu chỉ có 1 trang nên figure.page luôn là 0 → dùng đúng trang đó
+          results[i] = buildQuestions(r.data, format, page ? [page] : []);
+        },
+      );
+      failedPages.sort((a, b) => a - b);
+      questions = results.flat().filter(Boolean);
       questions = mergeAndRenumber(questions);
     }
   } finally {
@@ -611,6 +754,13 @@ async function createExam() {
   ) {
     toast(
       `Tách được ${questions.length} câu. Nếu thiếu, hãy chọn thêm trang có đề.`,
+      "warn",
+    );
+  }
+
+  if (partialPages.length) {
+    toast(
+      "AI trả về chưa đủ (bị cắt giữa chừng) nên có thể thiếu câu. Hãy chọn ít trang hơn rồi tạo lại.",
       "warn",
     );
   }
@@ -658,15 +808,29 @@ function writeRecent(list) {
   }
 }
 
-function saveCurrent() {
+// Ghi localStorage tốn thời gian (đề có hình rất nặng), nên gộp nhiều lần chọn đáp án thành một lần ghi
+let saveTimer = null;
+
+function saveCurrent(immediate = false) {
   if (!state.current) return;
-  const list = readRecent().filter((e) => e.id !== state.current.id);
-  list.unshift(state.current);
-  const ok = writeRecent(list);
-  $("save-status").textContent = ok
-    ? "Đã lưu tự động"
-    : "Không lưu được (bộ nhớ trình duyệt đầy)";
+  const run = () => {
+    saveTimer = null;
+    if (!state.current) return;
+    const list = readRecent().filter((e) => e.id !== state.current.id);
+    list.unshift(state.current);
+    const ok = writeRecent(list);
+    $("save-status").textContent = ok
+      ? "Đã lưu tự động"
+      : "Không lưu được (bộ nhớ trình duyệt đầy)";
+  };
+  clearTimeout(saveTimer);
+  if (immediate) run();
+  else saveTimer = setTimeout(run, 500);
 }
+
+window.addEventListener("pagehide", () => {
+  if (saveTimer) saveCurrent(true);
+});
 
 function progressOf(exam) {
   const done = exam.questions.filter((q, i) =>
@@ -747,7 +911,8 @@ function maxScore(q) {
   if (state.current.format === "short") return 10 / Math.max(1, total);
   if (q.type === "mcq") return 0.25;
   if (q.type === "tf") return 1;
-  return 0.5;
+  // Đề THPT: câu trả lời ngắn môn Toán 0.5đ, các môn khác 0.25đ
+  return /toán/i.test(state.current.subject || "") ? 0.5 : 0.25;
 }
 
 function gradeQuestion(q, ans) {
@@ -783,6 +948,7 @@ function totals() {
   let max = 0;
   exam.questions.forEach((q, i) => {
     const g = gradeQuestion(q, exam.answers[i]);
+    if (g.status === "nokey") return; // câu chưa có đáp án thì không tính vào thang điểm
     max += g.max;
     if (exam.checked[i]) earned += g.earned;
   });
@@ -851,6 +1017,7 @@ function openExam(exam) {
   state.explain = {};
   state.quick = {};
   state.chat = {};
+  state.quickLoading = {};
   state.idx = Math.max(
     0,
     exam.questions.findIndex((q, i) => !isAnswered(q, exam.answers[i])),
@@ -865,6 +1032,7 @@ function openExam(exam) {
   saveCurrent();
   showQuestion(state.idx);
   window.scrollTo(0, 0);
+  solveInBackground(exam);
 }
 
 function showQuestion(i) {
@@ -1073,7 +1241,7 @@ function renderResult() {
   updateTotal();
 }
 
-function setTab(name) {
+function setTab(name, load = true) {
   state.tab = name;
   const essayOn = name === "essay";
   $("tab-essay").classList.toggle("active", essayOn);
@@ -1088,17 +1256,25 @@ function setTab(name) {
   quick.classList.toggle("active", !essayOn);
   setHidden(quick, essayOn);
 
-  if (!essayOn) loadQuick();
+  if (!essayOn && load) loadQuick();
 }
 
 function renderExplainPanel() {
   const i = state.idx;
-  $("content-essay").textContent =
-    state.explain[i] || 'Bấm "Xem lời giải câu này" để AI chữa bài.';
+  const essay = $("content-essay");
+  if (state.explain[i]) setMarkdown(essay, state.explain[i]);
+  else setPlain(essay, 'Bấm "Xem lời giải câu này" để AI chữa bài.');
   setHidden($("quick-warning"), true);
-  $("quick-detail").textContent = state.quick[i] || "";
-  setTab(state.tab);
-  typeset([$("content-essay")]);
+  const quick = $("quick-detail");
+  if (state.quick[i]) setMarkdown(quick, state.quick[i]);
+  else
+    setPlain(
+      quick,
+      'Bấm lại tab "Trắc nghiệm nhanh" để AI gợi ý cách làm nhanh.',
+    );
+  // Không tự gọi AI khi chuyển câu: tránh tốn lượt và chờ lâu
+  setTab(state.tab, false);
+  typeset([essay, quick]);
 }
 
 async function loadQuick() {
@@ -1109,27 +1285,30 @@ async function loadQuick() {
   const warn = $("quick-warning");
 
   if (state.quick[i]) {
-    detail.textContent = state.quick[i];
+    setMarkdown(detail, state.quick[i]);
     typeset([detail]);
     return;
   }
+  if (state.quickLoading[i]) return;
+  state.quickLoading[i] = true;
   setHidden(warn, true);
-  detail.textContent = "AI đang tìm cách làm nhanh...";
+  setPlain(detail, "AI đang tìm cách làm nhanh...");
 
   const r = await postJSON("/api/quick-tip", {
     question: questionFull(q),
     subject: exam.subject,
   });
+  state.quickLoading[i] = false;
   if (state.current !== exam) return;
 
   if (r.ok) {
     state.quick[i] = r.data?.text || "Chưa có mẹo cho câu này.";
     if (state.idx === i) {
-      detail.textContent = state.quick[i];
+      setMarkdown(detail, state.quick[i]);
       typeset([detail]);
     }
   } else if (state.idx === i) {
-    detail.textContent = "";
+    setPlain(detail, "");
     warn.textContent = errorMessage(r);
     setHidden(warn, false);
   }
@@ -1142,8 +1321,8 @@ async function explainCurrent() {
   const q = exam.questions[i];
 
   state.explaining = true;
-  setTab("essay");
-  $("content-essay").textContent = "AI đang chữa bài...";
+  setTab("essay", false);
+  setPlain($("content-essay"), "AI đang chữa bài...");
 
   const r = await postJSON("/api/grade-explain", {
     question: questionFull(q),
@@ -1155,11 +1334,10 @@ async function explainCurrent() {
   state.explaining = false;
   if (state.current !== exam) return;
 
-  state.explain[i] = r.ok
-    ? r.data?.text || "AI không trả về nội dung."
-    : errorMessage(r);
+  if (r.ok) state.explain[i] = r.data?.text || "AI không trả về nội dung.";
   if (state.idx === i) {
-    $("content-essay").textContent = state.explain[i];
+    if (r.ok) setMarkdown($("content-essay"), state.explain[i]);
+    else setPlain($("content-essay"), errorMessage(r));
     typeset([$("content-essay")]);
   }
 }
@@ -1170,7 +1348,8 @@ function renderChat() {
   (state.chat[state.idx] || []).forEach((m) => {
     const d = document.createElement("div");
     d.className = "chat-msg " + (m.role === "user" ? "user" : "assistant");
-    d.textContent = m.content;
+    if (m.role === "user") d.textContent = m.content;
+    else setMarkdown(d, m.content);
     box.appendChild(d);
   });
   box.scrollTop = box.scrollHeight;
@@ -1187,7 +1366,10 @@ async function sendChat(e) {
   const i = state.idx;
   const q = exam.questions[i];
   const hist = state.chat[i] || (state.chat[i] = []);
-  const history = hist.slice(-10);
+  const history = hist
+    .filter((m) => !m.error)
+    .slice(-10)
+    .map(({ role, content }) => ({ role, content }));
 
   input.value = "";
   hist.push({ role: "user", content: message });
@@ -1211,21 +1393,115 @@ async function sendChat(e) {
   hist.push({
     role: "assistant",
     content: r.ok ? r.data?.text || "AI không trả lời." : errorMessage(r),
+    error: !r.ok, // tin báo lỗi không gửi lại cho AI ở lượt sau
   });
   if (state.idx === i) renderChat();
 }
 
 /* ============ Nộp bài, chia sẻ ============ */
 
-function submitExam() {
+const fillingNow = new Map(); // id đề → Promise đang giải
+
+async function doFillMissingKeys(exam) {
+  const missing = exam.questions
+    .map((q, i) => ({ q, i }))
+    .filter(({ q }) => q.key === null || q.key === undefined);
+  if (!missing.length || exam.solveTried) return 0;
+
+  const chunks = [];
+  for (let k = 0; k < missing.length; k += 10) {
+    chunks.push(missing.slice(k, k + 10));
+  }
+  let filled = 0;
+  let allOk = true;
+  await runPool(chunks, 2, async (chunk) => {
+    const r = await postJSON("/api/solve", {
+      subject: exam.subject,
+      questions: chunk.map(({ q, i }) => ({
+        i,
+        type: q.type,
+        text: q.text,
+        options: q.options,
+        statements: q.statements,
+      })),
+    });
+    if (!r.ok) {
+      allOk = false;
+      return;
+    }
+    (r.data?.answers || []).forEach((a) => {
+      const q = exam.questions[Number(a?.i)];
+      if (!q || (q.key !== null && q.key !== undefined)) return;
+      const key = normalizeKey({ answer: a.answer }, q.type);
+      if (key !== null) {
+        q.key = key;
+        q.solved = true;
+        filled++;
+      }
+    });
+  });
+  if (allOk) exam.solveTried = true; // lỗi tạm thời thì còn thử lại được khi nộp bài
+  return filled;
+}
+
+function fillMissingKeys(exam) {
+  if (!fillingNow.has(exam.id)) {
+    const p = doFillMissingKeys(exam).finally(() => fillingNow.delete(exam.id));
+    fillingNow.set(exam.id, p);
+  }
+  return fillingNow.get(exam.id);
+}
+
+// Chạy ngầm khi mở đề: câu nào AI chưa có đáp án thì nhờ AI giải để luyện tập có chấm điểm ngay
+function solveInBackground(exam) {
+  if (!exam.questions.some((q) => q.key === null || q.key === undefined))
+    return;
+  fillMissingKeys(exam).then((filled) => {
+    if (!filled || state.current !== exam) return;
+    saveCurrent();
+    renderAnswerArea();
+    renderNav();
+    renderResult();
+  });
+}
+
+let submitting = false;
+
+async function submitExam() {
   const exam = state.current;
-  if (!exam) return;
-  exam.checked = exam.questions.map(() => true);
-  saveCurrent();
-  showQuestion(state.idx);
-  const { earned, max } = totals();
-  const score = max ? (earned / max) * 10 : 0;
-  toast(`Đã nộp bài: ${score.toFixed(2)}/10`, "success");
+  if (!exam || submitting) return;
+  submitting = true;
+  try {
+    const needSolve =
+      fillingNow.has(exam.id) ||
+      (!exam.solveTried &&
+        exam.questions.some((q) => q.key === null || q.key === undefined));
+    if (needSolve) {
+      setLoading(true, "AI đang giải các câu chưa có đáp án để chấm điểm...");
+      await fillMissingKeys(exam);
+      setLoading(false);
+    }
+    if (state.current !== exam) return;
+
+    exam.checked = exam.questions.map(() => true);
+    saveCurrent(true);
+    showQuestion(state.idx);
+
+    const { earned, max } = totals();
+    const score = max ? (earned / max) * 10 : 0;
+    const noKey = exam.questions.filter(
+      (q) => q.key === null || q.key === undefined,
+    ).length;
+    const aiSolved = exam.questions.filter((q) => q.solved).length;
+    let msg = `Đã nộp bài: ${score.toFixed(2)}/10`;
+    if (aiSolved)
+      msg += `. ${aiSolved} câu chấm theo đáp án do AI giải (tham khảo)`;
+    if (noKey) msg += `. ${noKey} câu chưa có đáp án nên không tính điểm`;
+    toast(msg, noKey ? "warn" : "success");
+  } finally {
+    submitting = false;
+    setLoading(false);
+  }
 }
 
 function encodeShare(obj) {
@@ -1290,6 +1566,7 @@ function openSharedFromHash() {
 /* ============ Điều hướng & giao diện ============ */
 
 function goHome() {
+  if (saveTimer) saveCurrent(true);
   setHidden($("exam-view"), true);
   $("exam-view").classList.remove("active");
   setHidden($("home-view"), false);

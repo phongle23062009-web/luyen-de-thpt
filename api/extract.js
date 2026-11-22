@@ -1,12 +1,16 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
 // ===== Cấu hình =====
-const GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite"];
+const GEMINI_MODELS = [
+  "gemini-3.8-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+];
 const OPENROUTER_DEFAULT_MODEL = "google/gemma-4-26b-a4b-it:free";
 
 // Vercel giới hạn 60 giây cho mỗi lần gọi hàm, nên tổng thời gian phải nhỏ hơn
 const TOTAL_BUDGET_MS = 55000;
-const GEMINI_MAX_MS = 45000;
+const GEMINI_MAX_MS = 32000; // mỗi lần gọi Gemini; quá chậm thì sang model nhanh hơn / dự phòng
 const OPENROUTER_MAX_MS = 15000;
 
 /* ===================== Tiện ích ===================== */
@@ -351,11 +355,14 @@ async function runGemini(parts, apiKey, deadline) {
   const tried = [];
   let lastErr = null;
   let useSchema = true; // nếu Gemini từ chối schema (lỗi 400) thì thử lại không schema
+  let useThinking = true; // nếu model từ chối cấu hình suy nghĩ thì bỏ đi
   const thinkingEnv = env("GEMINI_THINKING");
   const thinkingBudget =
     thinkingEnv !== "" && !Number.isNaN(Number(thinkingEnv))
       ? Number(thinkingEnv)
-      : 1024; // cho phép "nghĩ" chút để tự giải đáp án chính xác hơn
+      : 512; // Gemini 2.5: ngân sách suy nghĩ nhỏ cho nhanh (việc tự giải đã có /api/solve lo)
+  // Gemini 3.x dùng thinkingLevel (low/medium/high), mặc định low để giảm độ trễ
+  const thinkingLevel = (env("GEMINI_THINKING_LEVEL") || "low").toUpperCase();
 
   for (const model of models) {
     tried.push(model);
@@ -374,9 +381,13 @@ async function runGemini(parts, apiKey, deadline) {
         maxOutputTokens: 16000,
       };
       if (useSchema) config.responseSchema = EXAM_SCHEMA;
-      // Chỉ model 2.5 nhận thinkingBudget
-      if (model.startsWith("gemini-2.5")) {
-        config.thinkingConfig = { thinkingBudget };
+      // 2.5 dùng thinkingBudget, 3.x dùng thinkingLevel
+      if (useThinking) {
+        if (model.startsWith("gemini-2.5")) {
+          config.thinkingConfig = { thinkingBudget };
+        } else if (model.startsWith("gemini-3")) {
+          config.thinkingConfig = { thinkingLevel };
+        }
       }
 
       try {
@@ -396,6 +407,15 @@ async function runGemini(parts, apiKey, deadline) {
         return { text: getResponseText(response), model: `gemini:${model}` };
       } catch (err) {
         lastErr = err;
+        // Cấu hình suy nghĩ bị từ chối: thử lại cùng model, không gửi cấu hình đó
+        if (useThinking && /thinking/i.test(errMessage(err))) {
+          console.warn(
+            "[extract] Bỏ thinkingConfig:",
+            errMessage(err).slice(0, 200),
+          );
+          useThinking = false;
+          continue;
+        }
         // Schema bị từ chối: thử lại cùng model nhưng không dùng schema
         if (
           useSchema &&
@@ -408,8 +428,12 @@ async function runGemini(parts, apiKey, deadline) {
           useSchema = false;
           continue;
         }
-        // Quá chậm: không thử model khác nữa, chuyển sang AI dự phòng
-        if (err.timeout) throw Object.assign(err, { tried });
+        // Quá chậm: chỉ thử model kế tiếp nếu còn đủ thời gian, nếu không chuyển sang AI dự phòng
+        if (err.timeout) {
+          if (deadline - Date.now() < 15000)
+            throw Object.assign(err, { tried });
+          break;
+        }
         // Lỗi tạm thời: thử lại đúng 1 lần nếu còn thời gian
         if (isBusy(err) && attempt === 0 && deadline - Date.now() > 15000) {
           await sleep(2000);

@@ -6,5 +6,4 @@ Web application hỗ trợ học sinh tải lên đề thi (PDF/Ảnh), tự đ�
 
 - **Frontend:** HTML, CSS, JavaScript thuần, MathJax, PDF.js
 - **Backend:** Vercel Serverless Functions (`api/`)
-- **Database & Auth:** Firebase (Firestore, Auth, Storage)
 - **AI:** Google Gemini API

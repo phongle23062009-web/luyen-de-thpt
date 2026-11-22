@@ -1,4 +1,10 @@
-import { GoogleGenAI } from "@google/genai";
+import { askAI, parseBody, clip, sendAIError } from "../lib/ai.js";
+
+const SYSTEM =
+  "Bạn là trợ giảng luyện thi THPT thân thiện, chính xác. Bám sát ngữ cảnh câu hỏi bên dưới khi trả lời học sinh. " +
+  "Trả lời ngắn gọn bằng tiếng Việt (tối đa khoảng 12 dòng). Có thể dùng Markdown nhẹ (**in đậm**, gạch đầu dòng), không dùng bảng. " +
+  "Công thức viết trong $...$ hoặc $$...$$; công thức hóa học dùng \\mathrm, ví dụ $\\mathrm{C_4H_6}$. " +
+  "Nếu đáp án chuẩn trong ngữ cảnh có vẻ sai, nói rõ lý do thay vì làm theo.";
 
 function formatContext(context) {
   if (!context) return "";
@@ -11,78 +17,39 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "method_not_allowed" });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "missing_key" });
-  }
-
-  const body = req.body && typeof req.body === "object" ? req.body : {};
-  const contextText = formatContext(body.context);
-  const history = Array.isArray(body.history) ? body.history : [];
-  const message = typeof body.message === "string" ? body.message.trim() : "";
-
+  const body = parseBody(req);
+  const message = clip(
+    typeof body.message === "string" ? body.message.trim() : "",
+    4000,
+  );
   if (!message) {
     return res.status(400).json({ error: "missing_message" });
   }
 
-  const contents = [];
+  const contextText = clip(formatContext(body.context), 8000);
+  const history = (Array.isArray(body.history) ? body.history : [])
+    .filter((h) => h && typeof h.content === "string" && h.content.trim())
+    .slice(-10)
+    .map((h) => ({
+      role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
+      content: clip(h.content, 3000),
+    }));
 
-  if (contextText) {
-    contents.push({
-      role: "user",
-      parts: [
-        {
-          text: [
-            "Bạn là trợ giảng luyện thi THPT thân thiện, chính xác. Hãy bám sát ngữ cảnh câu hỏi và hướng dẫn dưới đây khi trả lời học sinh. Dùng LaTeX trong $...$ hoặc $$...$$ cho công thức.",
-            contextText,
-          ].join("\n\n"),
-        },
-      ],
-    });
-    contents.push({
-      role: "model",
-      parts: [
-        {
-          text: "Tôi đã nắm rõ hướng dẫn trợ giảng và nội dung câu hỏi. Hãy đặt câu hỏi.",
-        },
-      ],
-    });
-  }
-
-  for (const item of history) {
-    if (!item || typeof item.content !== "string" || !item.content.trim())
-      continue;
-    const role =
-      item.role === "assistant" || item.role === "model" ? "model" : "user";
-    contents.push({
-      role,
-      parts: [{ text: item.content }],
-    });
-  }
-
-  contents.push({
-    role: "user",
-    parts: [{ text: message }],
-  });
+  const system = contextText
+    ? `${SYSTEM}\n\nNGỮ CẢNH CÂU HỎI:\n${contextText}`
+    : SYSTEM;
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-
-    const response = await ai.models.generateContent({
-      model,
-      contents,
-      config: {
-        temperature: 0.3,
-      },
+    const { text, model } = await askAI({
+      system,
+      messages: [...history, { role: "user", content: message }],
+      temperature: 0.3,
+      level: "low",
+      perCallMs: 20000,
+      totalMs: 45000,
     });
-
-    const text = (response?.text ?? "").trim();
-    return res.status(200).json({ text });
+    return res.status(200).json({ text, model });
   } catch (err) {
-    return res.status(500).json({
-      error: "gemini_request_failed",
-      message: err?.message || "Unknown error",
-    });
+    return sendAIError(res, err);
   }
 }
