@@ -177,18 +177,18 @@ function clamp01(v) {
   return Math.min(1, Math.max(0, v));
 }
 
-// Cắt hình minh họa theo box [x0,y0,x1,y1] tọa độ 0–1000 trên trang
+// Cắt hình minh họa theo box [ymin, xmin, ymax, xmax] tọa độ 0–1000 trên trang
 function cropFigure(fig, page) {
   if (!fig || typeof fig !== "object" || !Array.isArray(fig.box)) return null;
   if (fig.box.length < 4 || !page) return null;
   const src = page.canvas;
-  const [a, b, c, d] = fig.box.map(Number);
-  if ([a, b, c, d].some((n) => Number.isNaN(n))) return null;
+  const [ya, xa, yb, xb] = fig.box.map(Number);
+  if ([ya, xa, yb, xb].some((n) => Number.isNaN(n))) return null;
 
-  const x0 = Math.min(a, c) / 1000;
-  const x1 = Math.max(a, c) / 1000;
-  const y0 = Math.min(b, d) / 1000;
-  const y1 = Math.max(b, d) / 1000;
+  const y0 = Math.min(ya, yb) / 1000;
+  const y1 = Math.max(ya, yb) / 1000;
+  const x0 = Math.min(xa, xb) / 1000;
+  const x1 = Math.max(xa, xb) / 1000;
 
   const sx = clamp01(x0) * src.width;
   const sy = clamp01(y0) * src.height;
@@ -437,9 +437,15 @@ function normalizeKey(q, type) {
   }
   if (type === "tf") {
     const labels = ["a", "b", "c", "d"];
+    const parts =
+      typeof raw === "string" ? raw.split(/[\s,;|]+/).filter(Boolean) : null;
     const vals = labels.map((l, k) =>
       toBool(
-        Array.isArray(raw) ? raw[k] : (raw?.[l] ?? raw?.[l.toUpperCase()]),
+        parts
+          ? parts[k]
+          : Array.isArray(raw)
+            ? raw[k]
+            : (raw?.[l] ?? raw?.[l.toUpperCase()]),
       ),
     );
     return vals.every((v) => v === null) ? null : vals;
@@ -455,23 +461,33 @@ function buildQuestions(data, format, pages) {
 
   raw.forEach((q) => {
     if (!q || typeof q !== "object") return;
-    const type = detectType(q);
-    if (format === "short" && type !== "mcq") return;
+    let type = detectType(q);
     const text = String(q.prompt ?? q.text ?? "").trim();
     if (!text) return;
+
+    // Câu có lựa chọn thì luôn coi là trắc nghiệm; câu "mcq" thiếu lựa chọn thì chuyển thành trả lời ngắn
+    const opts = normalizeOptions(q.options);
+    if (type !== "tf" && opts.length >= 2) type = "mcq";
+    else if (type === "mcq") type = "short";
+    // Định dạng "Trắc nghiệm ngắn" chỉ nhận câu có lựa chọn
+    if (format === "short" && type !== "mcq") return;
 
     const fig = q.figure && typeof q.figure === "object" ? q.figure : null;
     const page = pages[Number(fig?.page) || 0] || pages[0];
     items.push({
       type,
       text,
-      options: type === "mcq" ? normalizeOptions(q.options) : null,
+      options: type === "mcq" ? opts : null,
       statements: type === "tf" ? normalizeStatements(q.statements) : null,
       key: normalizeKey(q, type),
+      solved: q.solved === true,
       figure: fig,
       figureImage: cropFigure(fig, page),
     });
   });
+  console.info(
+    `[extract] AI trả ${raw.length} câu, giữ lại ${items.length} câu (định dạng: ${format})`,
+  );
 
   return items;
 }
@@ -861,6 +877,9 @@ function showQuestion(i) {
   const partNames = { mcq: "Phần I", tf: "Phần II", short: "Phần III" };
   $("question-part-badge").textContent =
     exam.format === "short" ? "Trắc nghiệm" : partNames[q.type];
+  if (q.solved) {
+    $("question-part-badge").textContent += " · đáp án do AI giải";
+  }
   $("question-number-label").textContent =
     `Câu ${idx + 1}/${exam.questions.length}`;
 
