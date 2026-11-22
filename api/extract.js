@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { openrouterModels } from "../lib/ai.js";
 
 // ===== Cấu hình =====
 const GEMINI_MODELS = [
@@ -6,7 +7,6 @@ const GEMINI_MODELS = [
   "gemini-3.5-flash",
   "gemini-3.5-flash-lite",
 ];
-const OPENROUTER_DEFAULT_MODEL = "google/gemma-4-26b-a4b-it:free";
 
 // Vercel giới hạn 60 giây cho mỗi lần gọi hàm, nên tổng thời gian phải nhỏ hơn
 const TOTAL_BUDGET_MS = 55000;
@@ -298,7 +298,7 @@ function buildPrompt({ text, subject, format, mode, counts, imageCount }) {
     `${isGen ? "4" : "5"}. ĐÁP ÁN (trường answer, luôn là chuỗi): mcq = một chữ cái A/B/C/D; tf = bốn giá trị true/false theo thứ tự a,b,c,d ngăn cách bởi dấu phẩy (ví dụ "true,false,true,false"); short = số dùng dấu chấm thập phân (ví dụ 12.5) hoặc chữ ngắn. Ưu tiên đáp án có trong tài liệu; nếu không có thì TỰ GIẢI cẩn thận từng bước rồi mới chọn; chỉ ghi null khi thật sự không xác định được.`,
     `${isGen ? "5" : "6"}. solved = true khi đáp án do bạn tự giải hoặc phương án nhiễu do bạn tự tạo; solved = false khi câu hỏi và đáp án lấy nguyên từ tài liệu.`,
     `${isGen ? "6" : "7"}. Công thức toán, lý, hóa đặt trong $...$ (ví dụ $\\frac{1}{2}$; hóa học: $\\mathrm{CH_3NH_2}$, $\\mathrm{H_2SO_4}$). Trong chuỗi JSON, mọi dấu gạch chéo ngược phải viết thành hai dấu \\\\.`,
-    `${isGen ? "7" : "8"}. HÌNH MINH HỌA: nếu câu có hình đi kèm (công thức cấu tạo, đồ thị, hình học, sơ đồ, thí nghiệm, bảng dạng ảnh) nằm dưới hoặc bên cạnh câu hỏi, hoặc các lựa chọn là hình vẽ, hãy đặt figure = {"page": số trang, "box": [ymin, xmin, ymax, xmax]} với tọa độ nguyên 0–1000 (gốc ở góc trên trái của trang, ymin/ymax theo chiều cao, xmin/xmax theo chiều rộng). Box chỉ bao phần hình (chừa lề nhỏ), không bao chữ của câu hỏi. Chữ của câu vẫn phải gõ đầy đủ trong prompt, giữ cả lời dẫn như "có công thức như sau" hoặc "như hình vẽ". Câu không có hình thì figure = null.`,
+    `${isGen ? "7" : "8"}. HÌNH MINH HỌA: nếu câu có hình đi kèm (công thức cấu tạo, đồ thị, hình học, sơ đồ, thí nghiệm, bảng dạng ảnh) nằm dưới hoặc bên cạnh câu hỏi, hoặc các lựa chọn là hình vẽ, hãy đặt figure = {"page": số trang, "box": [ymin, xmin, ymax, xmax]} với tọa độ nguyên 0–1000 (gốc ở góc trên trái của trang, ymin/ymax theo chiều cao, xmin/xmax theo chiều rộng). Box chỉ bao phần hình (chừa lề nhỏ), không bao chữ của câu hỏi. Chữ của câu vẫn phải gõ đầy đủ trong prompt, giữ cả lời dẫn như "có công thức như sau" hoặc "như hình vẽ". Câu không có hình thì figure = null. BẮT BUỘC: câu nhắc "như hình vẽ", "hình bên", "đồ thị", "sơ đồ", "hình sau" hoặc có phương án là hình thì figure KHÔNG được để null.`,
     `${isGen ? "8" : "9"}. Chỉ trả về MỘT đối tượng JSON thuần túy, không lời dẫn, không markdown.`,
     "",
     "Mẫu JSON (chỉ là ví dụ về cấu trúc):",
@@ -552,7 +552,11 @@ export default async function handler(req, res) {
     problems.push("gemini: chưa đặt GEMINI_API_KEY");
   } else {
     try {
-      const r = await runGemini(parts, geminiKey, deadline);
+      const r = await runGemini(
+        parts,
+        geminiKey,
+        env("OPENROUTER_API_KEY") ? deadline - 18000 : deadline, // chừa thời gian cho OpenRouter
+      );
       rawText = r.text;
       usedModel = r.model;
     } catch (err) {
@@ -562,27 +566,31 @@ export default async function handler(req, res) {
     }
   }
 
-  // 2) OpenRouter: chỉ thử khi còn đủ thời gian
+  // 2) OpenRouter: thử lần lượt các model dự phòng (có hỗ trợ ảnh) khi còn đủ thời gian
   if (!usedModel) {
     const key = env("OPENROUTER_API_KEY");
-    const model = env("OPENROUTER_MODEL") || OPENROUTER_DEFAULT_MODEL;
-    const left = deadline - Date.now();
     if (!key) {
       problems.push("openrouter: chưa đặt OPENROUTER_API_KEY");
-    } else if (left < 8000) {
-      problems.push("openrouter: bỏ qua vì đã hết thời gian chờ");
     } else {
-      try {
-        rawText = await callOpenRouter(
-          parsedImages,
-          prompt,
-          model,
-          key,
-          Math.min(OPENROUTER_MAX_MS, left - 2000),
-        );
-        usedModel = `openrouter:${model}`;
-      } catch (err) {
-        problems.push(errMessage(err).slice(0, 200));
+      for (const model of openrouterModels()) {
+        const left = deadline - Date.now();
+        if (left < 6000) {
+          problems.push("openrouter: bỏ qua vì đã hết thời gian chờ");
+          break;
+        }
+        try {
+          rawText = await callOpenRouter(
+            parsedImages,
+            prompt,
+            model,
+            key,
+            Math.min(OPENROUTER_MAX_MS, left - 1000),
+          );
+          usedModel = `openrouter:${model}`;
+          break;
+        } catch (err) {
+          problems.push(`${model}: ${errMessage(err).slice(0, 150)}`);
+        }
       }
     }
   }

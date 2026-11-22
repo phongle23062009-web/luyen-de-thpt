@@ -260,6 +260,10 @@ function errorMessage(r) {
         ? `Lỗi AI: ${r.data?.message || "không rõ"}`
         : `Lỗi: ${r.error || "không xác định"}`;
   }
+  if (r.error === "ai_failed" && r.data?.message) {
+    console.warn("[ai_failed]", r.data.message);
+    msg += ` (${String(r.data.message).slice(0, 160)})`;
+  }
   const hint = r.data?.hint;
   return hint ? `${msg}. ${hint}` : msg;
 }
@@ -312,16 +316,19 @@ function cropFigure(fig, page) {
   const [ya, xa, yb, xb] = fig.box.map(Number);
   if ([ya, xa, yb, xb].some((n) => Number.isNaN(n))) return null;
 
-  const y0 = Math.min(ya, yb) / 1000;
-  const y1 = Math.max(ya, yb) / 1000;
-  const x0 = Math.min(xa, xb) / 1000;
-  const x1 = Math.max(xa, xb) / 1000;
+  // Tọa độ chuẩn 0–1000; nếu AI trả 0–1 thì quy đổi, và chừa lề nhỏ để không cắt sát hình
+  const k = Math.max(ya, xa, yb, xb) <= 1.5 ? 1000 : 1;
+  const pad = 0.015;
+  const y0 = (Math.min(ya, yb) * k) / 1000 - pad;
+  const y1 = (Math.max(ya, yb) * k) / 1000 + pad;
+  const x0 = (Math.min(xa, xb) * k) / 1000 - pad;
+  const x1 = (Math.max(xa, xb) * k) / 1000 + pad;
 
   const sx = clamp01(x0) * src.width;
   const sy = clamp01(y0) * src.height;
   const sw = clamp01(x1) * src.width - sx;
   const sh = clamp01(y1) * src.height - sy;
-  if (sw < 40 || sh < 40) return null;
+  if (sw < 24 || sh < 24) return null;
 
   const out = newCanvas(sw, sh);
   out
@@ -584,8 +591,25 @@ function normalizeKey(q, type) {
   return s || null;
 }
 
+// Câu nhắc tới hình/đồ thị/sơ đồ nên cần có hình đi kèm
+function needsFigure(text) {
+  return /(hình vẽ|như hình|hình bên|hình sau|hình dưới|đồ thị|sơ đồ|biểu đồ|bảng sau)/i.test(
+    text,
+  );
+}
+
+// Ảnh cả trang (thu nhỏ), dùng khi AI không khoanh được vùng hình; lưu tạm để các câu cùng trang dùng chung
+function pageSnapshot(page) {
+  if (!page._snap) {
+    page._snap =
+      "data:image/jpeg;base64," + compressCanvas(page.canvas, 1000, 0.6);
+  }
+  return page._snap;
+}
+
 // Chuyển dữ liệu AI thành câu hỏi. `pages` là danh sách trang tương ứng với figure.page
-function buildQuestions(data, format, pages) {
+// allowPageFallback: nếu câu cần hình mà AI không khoanh được thì hiện cả trang gốc (không dùng cho chế độ tạo đề mới)
+function buildQuestions(data, format, pages, allowPageFallback = true) {
   const raw = Array.isArray(data?.questions) ? data.questions : [];
   const items = [];
 
@@ -604,6 +628,12 @@ function buildQuestions(data, format, pages) {
 
     const fig = q.figure && typeof q.figure === "object" ? q.figure : null;
     const page = pages[Number(fig?.page) || 0] || pages[0];
+    let figureImage = cropFigure(fig, page);
+    let figureIsPage = false;
+    if (!figureImage && allowPageFallback && page && needsFigure(text)) {
+      figureImage = pageSnapshot(page);
+      figureIsPage = true;
+    }
     items.push({
       type,
       text,
@@ -612,7 +642,8 @@ function buildQuestions(data, format, pages) {
       key: normalizeKey(q, type),
       solved: q.solved === true,
       figure: fig,
-      figureImage: cropFigure(fig, page),
+      figureImage,
+      figureIsPage,
     });
   });
   console.info(
@@ -689,7 +720,9 @@ async function createExam() {
       });
       if (r.ok) {
         if (r.data?._partial) partialPages.push(0);
-        questions = mergeAndRenumber(buildQuestions(r.data, format, selected));
+        questions = mergeAndRenumber(
+          buildQuestions(r.data, format, selected, false),
+        );
       } else {
         lastError = r;
       }
@@ -1059,6 +1092,9 @@ function showQuestion(i) {
   const img = $("question-image");
   if (q.figureImage) {
     img.src = q.figureImage;
+    img.alt = q.figureIsPage
+      ? "Trang gốc chứa hình của câu này"
+      : "Hình minh họa";
     setHidden(imgBox, false);
   } else {
     img.removeAttribute("src");
@@ -1328,6 +1364,7 @@ async function explainCurrent() {
     question: questionFull(q),
     answer: answerText(q, exam.answers[i]),
     key: keyText(q),
+    answered: isAnswered(q, exam.answers[i]),
     subject: exam.subject,
     mode: "essay",
   });
@@ -1382,7 +1419,9 @@ async function sendChat(e) {
     `Môn: ${exam.subject}.`,
     `Đề câu hỏi:\n${questionFull(q)}`,
     `Đáp án chuẩn: ${keyText(q)}`,
-    `Học sinh trả lời: ${answerText(q, exam.answers[i])}`,
+    isAnswered(q, exam.answers[i])
+      ? `Học sinh trả lời: ${answerText(q, exam.answers[i])}`
+      : "Học sinh chưa làm câu này (không được kết luận là em không biết làm; chỉ cần hướng dẫn).",
   ].join("\n");
 
   const r = await postJSON("/api/chat", { context, history, message });

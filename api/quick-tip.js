@@ -26,6 +26,7 @@ export default async function handler(req, res) {
       ],
       temperature: 0.2,
       level: "low",
+      maxOutputTokens: 1536,
       perCallMs: 18000,
       totalMs: 45000,
     });
