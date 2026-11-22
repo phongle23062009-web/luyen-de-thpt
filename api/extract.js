@@ -238,6 +238,7 @@ function buildPrompt({
   counts,
   imageCount,
   contextPage,
+  light,
 }) {
   const safeSubject = subject || "Tổng hợp THPT";
   const isShort = format === "short";
@@ -301,6 +302,17 @@ function buildPrompt({
     "4. BỎ QUA: phần lý thuyết/công thức cần nhớ, tiêu đề, bảng cần điền, lời dẫn, và yêu cầu không rút ra được đáp án ngắn (chứng minh, vẽ đồ thị, giải thích dài). Nếu một câu lặp lại y nguyên trên cùng trang thì chỉ lấy một lần.",
   ];
 
+  // Chế độ nhanh (luyện tập nhanh / trò chơi): chỉ chép đề, KHÔNG giải. Việc giải do /api/solve làm
+  // từng câu khi cần, nên tạo đề xong ngay và không bị chờ lâu hay quá tải.
+  const lightTask = [
+    "NHIỆM VỤ (tách đề, CHẾ ĐỘ NHANH):",
+    "1. Đọc kỹ TOÀN BỘ trang ảnh và văn bản. Lấy mọi câu hỏi/bài tập, không bỏ sót câu ở cuối trang hay câu có nhiều ý con.",
+    "2. Chỉ CHÉP LẠI đề đúng như tài liệu. KHÔNG giải bài, KHÔNG tính toán, KHÔNG tự tạo phương án trả lời. Việc giải sẽ do bước khác đảm nhiệm.",
+    '3. Phân loại: "mcq" nếu tài liệu có sẵn lựa chọn A–D; "tf" nếu có sẵn các ý a–d cần xét Đúng/Sai; "short" cho MỌI câu còn lại (không có lựa chọn), kể cả bài tự luận kiểu Tìm, Tính, Giải, Rút gọn, Hoàn thành phương trình.',
+    '4. Bài có nhiều ý a), b), c), ...: tách MỖI Ý thành một câu "short" riêng. Phần prompt phải đủ ngữ cảnh để hiểu độc lập, ví dụ: "Bài 1a. Tìm nguyên hàm của hàm số $f(x) = x^4$."',
+    "5. BỎ QUA: lý thuyết/công thức cần nhớ, tiêu đề, bảng cần điền, lời dẫn, và yêu cầu không có đáp án ngắn (chứng minh, vẽ đồ thị, giải thích dài). Nếu một câu lặp lại y nguyên trên cùng trang thì chỉ lấy một lần.",
+  ];
+
   const genTask = [
     "NHIỆM VỤ (tạo đề mới):",
     "1. Đọc kỹ TOÀN BỘ trang ảnh và văn bản làm cơ sở kiến thức.",
@@ -308,13 +320,26 @@ function buildPrompt({
     "3. Nếu tài liệu có sẵn câu hỏi, có thể dùng lại và biến đổi số liệu.",
   ];
 
+  // Đánh số các mục tiếp theo nhiệm vụ (tạo đề: 3 mục, tách đề: 4 mục, chế độ nhanh: 5 mục)
+  let n = isGen ? 3 : light ? 5 : 4;
+  const num = () => ++n;
+
+  const answerRules = light
+    ? [
+        `${num()}. ĐÁP ÁN (trường answer, là chuỗi hoặc null): CHỈ điền khi tài liệu in sẵn đáp án của chính câu đó (bảng đáp án, lời giải mẫu), theo quy ước: mcq = một chữ cái A/B/C/D; tf = bốn giá trị true/false theo thứ tự a,b,c,d ngăn cách bởi dấu phẩy; short = số dùng dấu chấm thập phân hoặc chữ ngắn. Tài liệu không in đáp án thì để answer = null. Ngoại lệ duy nhất: câu BẮT BUỘC phải nhìn hình/đồ thị/sơ đồ mới giải được thì hãy giải và điền answer.`,
+        `${num()}. solved = true chỉ khi đáp án do bạn tự giải (ngoại lệ ở trên); còn lại solved = false.`,
+      ]
+    : [
+        `${num()}. ĐÁP ÁN (trường answer, luôn là chuỗi): mcq = một chữ cái A/B/C/D; tf = bốn giá trị true/false theo thứ tự a,b,c,d ngăn cách bởi dấu phẩy (ví dụ "true,false,true,false"); short = số dùng dấu chấm thập phân (ví dụ 12.5) hoặc chữ ngắn. Ưu tiên đáp án có trong tài liệu; nếu không có thì TỰ GIẢI cẩn thận từng bước rồi mới chọn; chỉ ghi null khi thật sự không xác định được.`,
+        `${num()}. solved = true khi đáp án do bạn tự giải hoặc phương án nhiễu do bạn tự tạo; solved = false khi câu hỏi và đáp án lấy nguyên từ tài liệu.`,
+      ];
+
   const common = [
-    `${isGen ? "4" : "5"}. ĐÁP ÁN (trường answer, luôn là chuỗi): mcq = một chữ cái A/B/C/D; tf = bốn giá trị true/false theo thứ tự a,b,c,d ngăn cách bởi dấu phẩy (ví dụ "true,false,true,false"); short = số dùng dấu chấm thập phân (ví dụ 12.5) hoặc chữ ngắn. Ưu tiên đáp án có trong tài liệu; nếu không có thì TỰ GIẢI cẩn thận từng bước rồi mới chọn; chỉ ghi null khi thật sự không xác định được.`,
-    `${isGen ? "5" : "6"}. solved = true khi đáp án do bạn tự giải hoặc phương án nhiễu do bạn tự tạo; solved = false khi câu hỏi và đáp án lấy nguyên từ tài liệu.`,
-    `${isGen ? "6" : "7"}. Công thức toán, lý, hóa đặt trong $...$ (ví dụ $\\frac{1}{2}$; hóa học: $\\mathrm{CH_3NH_2}$, $\\mathrm{H_2SO_4}$). Trong chuỗi JSON, mọi dấu gạch chéo ngược phải viết thành hai dấu \\\\.`,
-    `${isGen ? "7" : "8"}. HÌNH MINH HỌA: nếu câu có hình đi kèm (công thức cấu tạo, đồ thị, hình học, sơ đồ, thí nghiệm, bảng dạng ảnh) nằm dưới hoặc bên cạnh câu hỏi, hoặc các lựa chọn là hình vẽ, hãy đặt figure = {"page": số trang, "box": [ymin, xmin, ymax, xmax]} với tọa độ nguyên 0–1000 (gốc ở góc trên trái của trang, ymin/ymax theo chiều cao, xmin/xmax theo chiều rộng). Box chỉ bao phần hình (chừa lề nhỏ), không bao chữ của câu hỏi. Chữ của câu vẫn phải gõ đầy đủ trong prompt, giữ cả lời dẫn như "có công thức như sau" hoặc "như hình vẽ". Câu không có hình thì figure = null. Nếu các phương án A–D là hình vẽ (đồ thị, sơ đồ, hình học...) thì vẫn là mcq với options = {"A":"Hình A","B":"Hình B","C":"Hình C","D":"Hình D"} và figure là khung bao CẢ bốn hình cùng nhãn A, B, C, D; nếu một ý a–d của câu đúng/sai là hình thì ghi "Xem hình" cho ý đó. BẮT BUỘC: câu nhắc "như hình vẽ", "hình bên", "đồ thị", "sơ đồ", "hình sau" hoặc có phương án là hình thì figure KHÔNG được để null.`,
-    `${isGen ? "8" : "9"}. difficulty: độ khó của câu, số nguyên 1–3. 1 = dễ (nhận biết, nhớ công thức/khái niệm, làm trong khoảng 1 phút); 2 = vừa (thông hiểu, cần vài bước tính hoặc suy luận); 3 = khó (vận dụng/vận dụng cao, nhiều bước, mất 4–5 phút).`,
-    `${isGen ? "8" : "9"}. Chỉ trả về MỘT đối tượng JSON thuần túy, không lời dẫn, không markdown.`,
+    ...answerRules,
+    `${num()}. Công thức toán, lý, hóa đặt trong $...$ (ví dụ $\\frac{1}{2}$; hóa học: $\\mathrm{CH_3NH_2}$, $\\mathrm{H_2SO_4}$). Trong chuỗi JSON, mọi dấu gạch chéo ngược phải viết thành hai dấu \\\\.`,
+    `${num()}. HÌNH MINH HỌA: nếu câu có hình đi kèm (công thức cấu tạo, đồ thị, hình học, sơ đồ, thí nghiệm, bảng dạng ảnh) nằm dưới hoặc bên cạnh câu hỏi, hoặc các lựa chọn là hình vẽ, hãy đặt figure = {"page": số trang, "box": [ymin, xmin, ymax, xmax]} với tọa độ nguyên 0–1000 (gốc ở góc trên trái của trang, ymin/ymax theo chiều cao, xmin/xmax theo chiều rộng). Box chỉ bao phần hình (chừa lề nhỏ), không bao chữ của câu hỏi. Chữ của câu vẫn phải gõ đầy đủ trong prompt, giữ cả lời dẫn như "có công thức như sau" hoặc "như hình vẽ". Câu không có hình thì figure = null. Nếu các phương án A–D là hình vẽ (đồ thị, sơ đồ, hình học...) thì vẫn là mcq với options = {"A":"Hình A","B":"Hình B","C":"Hình C","D":"Hình D"} và figure là khung bao CẢ bốn hình cùng nhãn A, B, C, D; nếu một ý a–d của câu đúng/sai là hình thì ghi "Xem hình" cho ý đó. BẮT BUỘC: câu nhắc "như hình vẽ", "hình bên", "đồ thị", "sơ đồ", "hình sau" hoặc có phương án là hình thì figure KHÔNG được để null.`,
+    `${num()}. difficulty: độ khó của câu, số nguyên 1–3. 1 = dễ (nhận biết, nhớ công thức/khái niệm, làm trong khoảng 1 phút); 2 = vừa (thông hiểu, cần vài bước tính hoặc suy luận); 3 = khó (vận dụng/vận dụng cao, nhiều bước, mất 4–5 phút).`,
+    `${num()}. Chỉ trả về MỘT đối tượng JSON thuần túy, không lời dẫn, không markdown.`,
     "",
     "Mẫu JSON (chỉ là ví dụ về cấu trúc):",
     JSON.stringify(
@@ -355,14 +380,18 @@ function buildPrompt({
     ),
   ];
 
-  return [...head, ...(isGen ? genTask : extractTask), ...common]
+  return [
+    ...head,
+    ...(isGen ? genTask : light ? lightTask : extractTask),
+    ...common,
+  ]
     .filter((line) => line !== "")
     .join("\n");
 }
 
 /* ===================== Gemini ===================== */
 
-async function runGemini(parts, apiKey, deadline) {
+async function runGemini(parts, apiKey, deadline, light = false) {
   const ai = new GoogleGenAI({ apiKey });
   const models = [
     ...new Set([env("GEMINI_MODEL"), ...GEMINI_MODELS].filter(Boolean)),
@@ -372,8 +401,9 @@ async function runGemini(parts, apiKey, deadline) {
   let useSchema = true; // nếu Gemini từ chối schema (lỗi 400) thì thử lại không schema
   let useThinking = true; // nếu model từ chối cấu hình suy nghĩ thì bỏ đi
   const thinkingEnv = env("GEMINI_THINKING");
-  const thinkingBudget =
-    thinkingEnv !== "" && !Number.isNaN(Number(thinkingEnv))
+  const thinkingBudget = light
+    ? 0 // chế độ nhanh chỉ chép đề, không cần suy nghĩ
+    : thinkingEnv !== "" && !Number.isNaN(Number(thinkingEnv))
       ? Number(thinkingEnv)
       : 512; // Gemini 2.5: ngân sách suy nghĩ nhỏ cho nhanh (việc tự giải đã có /api/solve lo)
   // Gemini 3.x dùng thinkingLevel (low/medium/high), mặc định low để giảm độ trễ
@@ -534,6 +564,7 @@ export default async function handler(req, res) {
   const format = body.format === "short" ? "short" : "thpt";
   const mode = body.mode === "gen" ? "gen" : "extract";
   const contextPage = mode === "extract" && body.contextPage === true;
+  const light = mode === "extract" && body.light === true;
   const counts =
     body.counts && typeof body.counts === "object" ? body.counts : {};
 
@@ -553,6 +584,7 @@ export default async function handler(req, res) {
     counts,
     imageCount: parsedImages.length,
     contextPage,
+    light,
   });
   const parts = parsedImages.map((img) => ({
     inlineData: { mimeType: img.mimeType, data: img.data },
@@ -573,6 +605,7 @@ export default async function handler(req, res) {
         parts,
         geminiKey,
         env("OPENROUTER_API_KEY") ? deadline - 18000 : deadline, // chừa thời gian cho OpenRouter
+        light,
       );
       rawText = r.text;
       usedModel = r.model;

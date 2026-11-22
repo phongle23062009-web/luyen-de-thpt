@@ -376,7 +376,7 @@ async function addPdfPages(file) {
     const canvas = newCanvas(vp.width, vp.height);
     await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp })
       .promise;
-    state.pages.push({ canvas, selected: false });
+    state.pages.push({ canvas, selected: false, source: file.name });
     count++;
   }
   return count;
@@ -390,13 +390,17 @@ async function addImagePage(file) {
   );
   const canvas = newCanvas(img.naturalWidth * scale, img.naturalHeight * scale);
   canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-  state.pages.push({ canvas, selected: false });
+  state.pages.push({ canvas, selected: false, source: file.name });
 }
 
-async function loadFiles(files) {
+// replace = true: tài liệu mới thay hẳn các trang của tài liệu cũ (tránh nhầm trang cũ với đề mới).
+// Chụp ảnh nhiều trang (camera) thì thêm vào để ghép thành một tài liệu.
+async function loadFiles(files, { replace = false } = {}) {
   if (!files.length) return;
   setLoading(true, "Đang đọc tài liệu...");
   let added = 0;
+  const oldPages = state.pages;
+  if (replace) state.pages = [];
   try {
     for (const file of files) {
       if (state.pages.length >= MAX_PAGES) {
@@ -420,20 +424,43 @@ async function loadFiles(files) {
     setLoading(false);
   }
 
+  if (!added && replace) state.pages = oldPages; // không đọc được file mới thì giữ lại tài liệu cũ
   if (added) {
     if (!state.pages.some((p) => p.selected)) {
       state.pages.slice(0, 3).forEach((p) => (p.selected = true));
     }
     setHidden($("page-grid-section"), false);
     renderPageGrid();
+    if (replace && oldPages.length) {
+      const names = [...new Set(files.map((f) => f.name))].join(", ");
+      toast(`Đã thay tài liệu cũ bằng: ${names} (${added} trang).`, "info");
+    }
   }
 }
 
 async function onFilesChosen(e) {
   const input = e.target;
   const files = Array.from(input.files || []);
+  const append = input.id === "camera-input";
   input.value = "";
-  await loadFiles(files);
+  await loadFiles(files, { replace: !append });
+}
+
+// Dòng ghi rõ đang dùng tài liệu nào, để không nhầm với tài liệu cũ
+function renderPageNote() {
+  const grid = $("page-grid");
+  if (!grid || !grid.parentNode) return;
+  let note = $("page-source-note");
+  if (!note) {
+    note = document.createElement("div");
+    note.id = "page-source-note";
+    note.style.cssText = "margin:0 0 8px;font-size:13px;opacity:.85";
+    grid.parentNode.insertBefore(note, grid);
+  }
+  const names = [...new Set(state.pages.map((p) => p.source).filter(Boolean))];
+  note.textContent = state.pages.length
+    ? `Tài liệu đang dùng: ${names.join(", ") || "ảnh chụp"} · ${state.pages.length} trang`
+    : "";
 }
 
 function renderPageGrid() {
@@ -467,6 +494,7 @@ function renderPageGrid() {
     tile.addEventListener("click", () => togglePage(i));
     grid.appendChild(tile);
   });
+  renderPageNote();
 }
 
 function selectedCount() {
@@ -738,6 +766,8 @@ async function createExam() {
       : "extract";
   const playMode =
     document.querySelector('input[name="play-mode"]:checked')?.value || "quick";
+  // Luyện tập nhanh / trò chơi: chỉ chép đề (nhanh). Đáp án do AI giải từng câu khi cần.
+  const light = mode === "extract" && playMode !== "mock";
   const mockMinutes = Number($("mock-time")?.value) || 0;
   // Cấu trúc chỉ dùng khi AI tạo đề mới; tách đề thì lấy đủ mọi loại câu có trong tài liệu
   const isShort =
@@ -805,6 +835,7 @@ async function createExam() {
                 ]
               : [],
             contextPage: !!next,
+            light,
             text: i === 0 ? text : "",
             subject: subjectLabel,
             mode,
@@ -897,15 +928,8 @@ async function createExam() {
     checked: questions.map(() => false),
   };
 
-  // Thi thử và trò chơi cần có đáp án ngay từ đầu: nhờ AI giải trước các câu còn thiếu
-  if (playMode !== "quick" && exam.questions.some((q) => q.key == null)) {
-    setLoading(true, "AI đang chuẩn bị đáp án để chấm điểm...");
-    try {
-      await fillMissingKeys(exam);
-    } finally {
-      setLoading(false);
-    }
-  }
+  // Mở đề ngay, không chờ AI giải. Luyện tập nhanh / trò chơi: giải từng câu khi cần;
+  // thi thử: giải ngầm trong lúc làm bài và chờ nốt khi nộp bài.
   openExam(exam);
 }
 
@@ -1182,7 +1206,7 @@ function openExam(exam) {
   else showQuestion(state.idx);
   window.scrollTo(0, 0);
 
-  if (exam.mode === "quick") solveInBackground(exam);
+  if (exam.mode === "mock") solveInBackground(exam);
   if (
     exam.mode === "mock" &&
     !exam.submitted &&
@@ -1241,8 +1265,14 @@ function showQuestion(i) {
   updateNavButtons();
   typeset([content, $("answer-mcq"), $("answer-tf")]);
 
-  // Sau khi nộp bài thi thử / kết thúc trò chơi: tự hiện lời giải nhanh của từng câu khi xem lại
-  if (modeOf(exam) !== "quick" && isFinished(exam)) setTab("quick", true);
+  warmQuestion(exam, idx);
+
+  // Sau khi nộp bài thi thử: tự hiện lời giải nhanh khi xem lại. Trò chơi: chỉ với câu làm sai.
+  if (modeOf(exam) !== "quick" && isFinished(exam)) {
+    const g = gradeQuestion(q, exam.answers[idx]);
+    if (modeOf(exam) === "mock" || g.status !== "correct")
+      setTab("quick", true);
+  }
 }
 
 function updateNavButtons() {
@@ -1258,11 +1288,20 @@ function updateNavButtons() {
   next.textContent = playingGame && idx === last ? "Xem kết quả" : "Câu tiếp";
 }
 
+// Chuyển câu do người dùng bấm: cho thử lại việc chuẩn bị đáp án nếu lần trước lỗi
+function navigateTo(i) {
+  const exam = state.current;
+  if (!exam) return;
+  const k = Math.max(0, Math.min(i, exam.questions.length - 1));
+  prepFailed.delete(prepId(exam, k));
+  showQuestion(k);
+}
+
 function onNextClick() {
   const exam = state.current;
   if (!exam) return;
   if (modeOf(exam) === "game" && !isFinished(exam)) gameNext();
-  else showQuestion(state.idx + 1);
+  else navigateTo(state.idx + 1);
 }
 
 function renderAnswerArea() {
@@ -1335,8 +1374,14 @@ function renderAnswerArea() {
       box.appendChild(row);
     });
   } else {
-    $("short-answer-input").value = ans || "";
-    $("short-answer-input").disabled = locked;
+    const inp = $("short-answer-input");
+    const awaiting = awaitingPrep(exam, i);
+    if (inp.dataset.ph === undefined) inp.dataset.ph = inp.placeholder || "";
+    inp.placeholder = awaiting
+      ? "⏳ AI đang chuẩn bị câu trắc nghiệm..."
+      : inp.dataset.ph;
+    inp.value = ans || "";
+    inp.disabled = locked || awaiting;
   }
 }
 
@@ -1394,13 +1439,8 @@ function afterAnswer(i) {
   renderResult();
   if (m === "quick") {
     renderExplainPanel();
-    if (exam.checked[i]) {
-      // chọn xong thì AI tự giải nhanh (chờ một chút phòng khi bấm đổi liên tục)
-      clearTimeout(state.autoTimer);
-      state.autoTimer = setTimeout(() => {
-        if (state.current === exam && state.idx === i) setTab("quick", true);
-      }, 400);
-    }
+    // Chỉ khi làm SAI mới tự hiện giải nhanh (chờ một chút phòng khi bấm đổi liên tục)
+    if (exam.checked[i]) maybeAutoExplain(exam, i);
   }
 }
 
@@ -1427,7 +1467,7 @@ function renderNav() {
     }
     btn.className = classes.join(" ");
     btn.disabled = modeOf(exam) === "game" && !isFinished(exam);
-    btn.addEventListener("click", () => showQuestion(i));
+    btn.addEventListener("click", () => navigateTo(i));
     bar.appendChild(btn);
   });
 
@@ -1460,8 +1500,14 @@ function renderResult() {
   }
 
   let text;
-  if (!exam.checked[i]) {
+  if (awaitingPrep(exam, i)) {
+    text = "⏳ AI đang chuẩn bị câu trắc nghiệm...";
+  } else if (exam.checked[i] && needsPrep(q) && prepJobs.has(prepId(exam, i))) {
+    text = "⏳ AI đang kiểm tra đáp án...";
+  } else if (!exam.checked[i]) {
     text = "Chọn đáp án (hoặc nhập rồi nhấn Enter) để chấm câu này.";
+  } else if (m === "game") {
+    text = gamePointsText(exam, i);
   } else {
     const g = gradeQuestion(q, ans);
     if (g.status === "nokey") {
@@ -1512,10 +1558,7 @@ function renderExplainPanel() {
   setHidden($("quick-warning"), true);
   if (state.quick[i]) setMarkdown(quick, state.quick[i]);
   else {
-    setPlain(
-      quick,
-      "Chọn đáp án để AI giải nhanh (kèm công thức hoặc khái niệm được áp dụng).",
-    );
+    setPlain(quick, quickHint(state.current, i));
   }
   // Không tự gọi AI khi chuyển câu: tránh tốn lượt và chờ lâu
   setTab(state.tab, false);
@@ -1726,6 +1769,218 @@ function solveInBackground(exam) {
   });
 }
 
+/* ============ Chuẩn bị câu hỏi theo yêu cầu (luyện tập nhanh / trò chơi) ============ */
+// Tạo đề chỉ chép đề, không giải. Khi cần, AI giải RIÊNG TỪNG CÂU (đáp án chuẩn, và dựng 4 phương án
+// trắc nghiệm cho câu tự luận) và chuẩn bị sẵn 2 câu kế tiếp trong lúc học sinh đang làm câu hiện tại.
+
+const prepJobs = new Map(); // `${exam.id}:${i}` → Promise<boolean> đang chạy
+const prepFailed = new Set(); // câu đã thử mà không có kết quả (vào lại câu thì thử lại)
+const pendingLocks = new Map(); // trò chơi: câu đã chốt đang chờ đáp án để tính điểm
+const prefetching = new Set(); // id đề đang chuẩn bị trước các câu kế tiếp
+let lastPrepToast = 0;
+
+function prepId(exam, i) {
+  return `${exam.id}:${i}`;
+}
+
+function lazyMode(exam) {
+  const m = modeOf(exam);
+  return m === "quick" || m === "game";
+}
+
+function needsPrep(q) {
+  return q.key === null || q.key === undefined;
+}
+
+// AI giải bằng chữ nên không đoán những câu phải nhìn hình mới làm được
+function needsFigureToSolve(q) {
+  return !!(q.figure || q.figureImage);
+}
+
+// Câu tự luận (kiểu "short" chưa có đáp án) phải chờ AI dựng phương án trước khi làm
+function awaitingPrep(exam, i) {
+  const q = exam?.questions?.[i];
+  return (
+    !!q &&
+    lazyMode(exam) &&
+    q.type === "short" &&
+    needsPrep(q) &&
+    !needsFigureToSolve(q) &&
+    !prepFailed.has(prepId(exam, i))
+  );
+}
+
+function applyPrepared(exam, i, a) {
+  const q = exam.questions[i];
+  if (!q || !a) return false;
+  if (q.type === "short" && a.type === "mcq" && a.options) {
+    const opts = normalizeOptions(a.options);
+    const key = normalizeKey({ answer: a.answer }, "mcq");
+    if (opts.length >= 2 && key && opts.some((o) => o.label === key)) {
+      q.type = "mcq";
+      q.options = opts;
+      q.key = key;
+      q.statements = null;
+      q.solved = true;
+      q.converted = true;
+      if (!isAnswered(q, exam.answers[i])) exam.answers[i] = initialAnswer(q);
+      return true;
+    }
+    return false;
+  }
+  const key = normalizeKey({ answer: a.answer }, q.type);
+  if (key === null) return false;
+  q.key = key;
+  q.solved = true;
+  return true;
+}
+
+function prepareQuestion(exam, i) {
+  const q = exam.questions[i];
+  if (!q || !needsPrep(q)) return Promise.resolve(true);
+  const id = prepId(exam, i);
+  if (prepJobs.has(id)) return prepJobs.get(id);
+  if (needsFigureToSolve(q)) {
+    prepFailed.add(id); // không đoán bừa khi chưa nhìn được hình
+    return Promise.resolve(false);
+  }
+  prepFailed.delete(id);
+
+  const job = (async () => {
+    const r = await postJSON(
+      "/api/solve",
+      {
+        subject: exam.subject,
+        questions: [
+          {
+            i,
+            type: q.type,
+            text: q.text,
+            options: q.options,
+            statements: q.statements,
+            convert: q.type === "short",
+          },
+        ],
+      },
+      65000,
+    );
+    let ok = false;
+    if (r.ok) {
+      const a = (r.data?.answers || []).find((x) => Number(x?.i) === i);
+      ok = applyPrepared(exam, i, a);
+    } else if (Date.now() - lastPrepToast > 20000) {
+      lastPrepToast = Date.now();
+      toast(
+        `${errorMessage(r)}. Câu này tạm thời chưa có đáp án chuẩn.`,
+        "warn",
+      );
+    }
+    if (!ok) prepFailed.add(id);
+    return ok;
+  })().finally(() => prepJobs.delete(id));
+  prepJobs.set(id, job);
+  return job;
+}
+
+function jobsOf(map, exam) {
+  return [...map.entries()]
+    .filter(([id]) => id.startsWith(exam.id + ":"))
+    .map(([, p]) => p);
+}
+
+// Chuẩn bị trước tối đa `count` câu kế tiếp, lần lượt từng câu (không dồn dập gây quá tải)
+async function prefetchAhead(exam, count = 2) {
+  if (!lazyMode(exam) || prefetching.has(exam.id)) return;
+  prefetching.add(exam.id);
+  try {
+    for (;;) {
+      if (state.current !== exam || isFinished(exam)) break;
+      const base = state.idx;
+      const cur = prepJobs.get(prepId(exam, base));
+      if (cur) await cur.catch(() => {}); // ưu tiên câu đang làm
+      if (state.current !== exam || isFinished(exam)) break;
+
+      let target = -1;
+      for (
+        let j = state.idx + 1;
+        j <= state.idx + count && j < exam.questions.length;
+        j++
+      ) {
+        if (needsPrep(exam.questions[j]) && !prepFailed.has(prepId(exam, j))) {
+          target = j;
+          break;
+        }
+      }
+      if (target < 0) break;
+      await prepareQuestion(exam, target);
+      if (state.current === exam) {
+        saveCurrent();
+        renderNav();
+      }
+    }
+  } finally {
+    prefetching.delete(exam.id);
+  }
+}
+
+// Gọi sau khi hiện một câu: bắt đầu chuẩn bị câu này (nếu cần) và các câu kế tiếp
+function warmQuestion(exam, i) {
+  const q = exam?.questions?.[i];
+  if (!q || !lazyMode(exam) || isFinished(exam)) return;
+  const id = prepId(exam, i);
+  if (needsPrep(q) && !prepJobs.has(id) && !prepFailed.has(id)) {
+    prepareQuestion(exam, i).then(() => afterPrep(exam, i));
+  }
+  prefetchAhead(exam, 2);
+}
+
+// Có kết quả chuẩn bị cho câu i: vẽ lại phần đang hiển thị
+function afterPrep(exam, i) {
+  if (state.current !== exam) return;
+  saveCurrent();
+  renderNav();
+  if (state.idx !== i) return;
+  renderAnswerArea();
+  renderResult();
+  updateGameBar();
+  typeset([$("question-content"), $("answer-mcq"), $("answer-tf")]);
+  if (modeOf(exam) === "quick" && exam.checked[i]) maybeAutoExplain(exam, i);
+}
+
+// Luyện tập nhanh: chỉ khi làm SAI mới tự hiện giải nhanh. Làm đúng thì không gọi AI.
+function maybeAutoExplain(exam, i) {
+  clearTimeout(state.autoTimer);
+  const sig = JSON.stringify(exam.answers[i]);
+  state.autoTimer = setTimeout(async () => {
+    if (state.current !== exam || state.idx !== i || !exam.checked[i]) return;
+    await prepareQuestion(exam, i); // chờ có đáp án để biết đúng hay sai
+    if (state.current !== exam || state.idx !== i) return;
+    if (JSON.stringify(exam.answers[i]) !== sig) return; // đã đổi đáp án
+    saveCurrent();
+    renderAnswerArea();
+    renderNav();
+    renderResult();
+    const g = gradeQuestion(exam.questions[i], exam.answers[i]);
+    if (g.status === "wrong" || g.status === "partial") setTab("quick", true);
+    else renderExplainPanel();
+    typeset([$("answer-mcq"), $("answer-tf")]);
+  }, 400);
+}
+
+function quickHint(exam, i) {
+  if (!exam.checked[i]) {
+    return 'Chọn đáp án. Nếu làm sai, AI sẽ tự hiện cách giải nhanh; muốn xem lời giải đầy đủ thì bấm "Giải chi tiết từng bước".';
+  }
+  const g = gradeQuestion(exam.questions[i], exam.answers[i]);
+  if (g.status === "correct") {
+    return '✅ Bạn làm đúng rồi! Muốn xem cách làm nhanh thì bấm tab giải nhanh ở trên, hoặc "Giải chi tiết từng bước".';
+  }
+  if (g.status === "nokey") {
+    return "Câu này chưa có đáp án chuẩn. Bấm tab giải nhanh ở trên để AI hướng dẫn cách làm.";
+  }
+  return "Câu này chưa đúng. Bấm tab giải nhanh ở trên để xem cách làm.";
+}
+
 /* ============ Kiểu làm bài: luyện tập nhanh / thi thử / trò chơi ============ */
 
 function modeOf(exam) {
@@ -1736,15 +1991,31 @@ function isFinished(exam) {
   return modeOf(exam) === "game" ? !!exam.game?.finished : !!exam.submitted;
 }
 
-// AI chỉ hỗ trợ khi luyện tập nhanh, hoặc sau khi đã nộp bài / kết thúc trò chơi
-function aiAllowed(exam) {
-  return modeOf(exam) === "quick" || isFinished(exam);
+// AI hỗ trợ khi luyện tập nhanh, hoặc sau khi nộp bài / kết thúc trò chơi.
+// Đang chơi trò chơi: chỉ mở cho câu vừa chốt mà làm sai (hoặc chưa có đáp án chuẩn).
+function aiAllowed(exam, i = state.idx) {
+  if (modeOf(exam) === "quick" || isFinished(exam)) return true;
+  if (modeOf(exam) === "game") {
+    const g = exam.game;
+    if (!g || g.times[i] == null || pendingLocks.has(prepId(exam, i)))
+      return false;
+    return (
+      gradeQuestion(exam.questions[i], exam.answers[i]).status !== "correct"
+    );
+  }
+  return false;
 }
 
 function canAnswer(exam, i) {
   const m = modeOf(exam);
   if (m === "mock") return !exam.submitted;
-  if (m === "game") return !exam.game?.finished && exam.game?.times[i] == null;
+  if (m === "game") {
+    return (
+      !exam.game?.finished &&
+      exam.game?.times[i] == null &&
+      !exam.game?.preparing
+    );
+  }
   return true;
 }
 
@@ -1766,6 +2037,10 @@ function readRecords() {
 
 // Điểm cao hơn thắng; bằng điểm thì ai làm nhanh hơn thắng
 function cmpRun(a, b) {
+  // Trò chơi: nhiều điểm hơn thắng; còn lại điểm 10 cao hơn, bằng điểm thì nhanh hơn
+  if (a.points != null && b.points != null && a.points !== b.points) {
+    return b.points - a.points;
+  }
   return b.score10 - a.score10 || a.timeMs - b.timeMs;
 }
 
@@ -1836,6 +2111,9 @@ function newGame() {
     limitMs: 0,
     lastMsg: "",
     finished: false,
+    preparing: false, // đang chờ AI dựng phương án: đồng hồ chưa chạy
+    breakdown: [], // điểm chi tiết từng câu: { base, speed, streak }
+    scored: [], // câu đã tính điểm
   };
 }
 
@@ -1848,13 +2126,69 @@ function questionTimeMs(q) {
 function gameBegin(i) {
   const exam = state.current;
   const g = exam.game;
+  const q = exam.questions[i];
   clearTimeout(state.gameNextTimer);
   g.idx = i;
+  g.lastMsg = "";
+  if (awaitingPrep(exam, i)) {
+    // Câu tự luận cần AI dựng phương án trắc nghiệm: đồng hồ chỉ chạy khi câu đã sẵn sàng
+    g.preparing = true;
+    g.limitMs = questionTimeMs(q);
+    g.qStart = 0;
+    g.qEndsAt = 0;
+    showQuestion(i);
+    prepareQuestion(exam, i).then((ok) => {
+      if (state.current !== exam || g.finished || g.idx !== i) return;
+      if (!ok) {
+        toast(
+          "AI đang bận nên câu này chưa có đáp án chuẩn và sẽ không tính điểm.",
+          "warn",
+        );
+      }
+      gameStartTimer(i);
+    });
+  } else {
+    gameStartTimer(i);
+  }
+}
+
+function gameStartTimer(i) {
+  const exam = state.current;
+  const g = exam.game;
+  g.preparing = false;
   g.limitMs = questionTimeMs(exam.questions[i]);
   g.qStart = Date.now();
   g.qEndsAt = g.qStart + g.limitMs;
-  g.lastMsg = "";
   showQuestion(i);
+}
+
+function refreshGameUI(exam) {
+  renderAnswerArea();
+  renderNav();
+  updateGameBar();
+  updateNavButtons();
+  applyModeUI(exam);
+}
+
+// Điểm trò chơi của một câu (hiện khi xem lại sau khi kết thúc)
+function gamePointsText(exam, i) {
+  const q = exam.questions[i];
+  const g = gradeQuestion(q, exam.answers[i]);
+  const pts = exam.game?.points?.[i] ?? 0;
+  const bd = exam.game?.breakdown?.[i];
+  if (g.status === "nokey") {
+    return "Câu này chưa có đáp án chuẩn nên không tính điểm.";
+  }
+  if (g.status === "correct") {
+    const parts = bd
+      ? ` (${bd.base} cơ bản${bd.speed ? ` + ${bd.speed} tốc độ` : ""}${bd.streak ? ` + ${bd.streak} chuỗi 🔥` : ""})`
+      : "";
+    return `✅ Chính xác! ⭐ +${pts} điểm${parts}`;
+  }
+  if (g.status === "partial") {
+    return `⚠️ Đúng ${g.c}/4 ý, ⭐ +${pts} điểm. Đáp án: ${keyText(q)}`;
+  }
+  return `❌ Chưa đúng (0 điểm). Đáp án: ${keyText(q)}`;
 }
 
 function gameLock(i, timedOut) {
@@ -1864,42 +2198,84 @@ function gameLock(i, timedOut) {
   const q = exam.questions[i];
   const elapsed = Math.min(g.limitMs, Date.now() - g.qStart);
 
+  // Chốt giờ ngay lúc bấm (không phụ thuộc thời gian AI kiểm tra đáp án)
   exam.checked[i] = true;
+  g.times[i] = timedOut ? g.limitMs : elapsed;
+  g.points[i] = 0;
+  clearTimeout(state.gameNextTimer);
+
+  // Chưa có đáp án chuẩn: chờ AI giải câu này rồi mới chấm điểm
+  if (needsPrep(q) && !prepFailed.has(prepId(exam, i))) {
+    g.lastMsg = "⏳ AI đang kiểm tra đáp án...";
+    refreshGameUI(exam);
+    const id = prepId(exam, i);
+    const job = prepareQuestion(exam, i).then(() => {
+      pendingLocks.delete(id);
+      if (state.current === exam && !g.finished) gameScore(i, timedOut);
+    });
+    pendingLocks.set(id, job);
+    return;
+  }
+  gameScore(i, timedOut);
+}
+
+// Điểm = đúng bao nhiêu × (100 cơ bản + tối đa 100 thưởng tốc độ) + thưởng chuỗi đúng (tối đa +50)
+function gameScore(i, timedOut) {
+  const exam = state.current;
+  const g = exam?.game;
+  if (!g || g.finished) return;
+  if (g.scored[i]) return;
+  g.scored[i] = true;
+
+  const q = exam.questions[i];
+  const elapsed = g.times[i] ?? g.limitMs;
   const gr = gradeQuestion(q, exam.answers[i]);
   const hasKey = gr.status !== "nokey" && gr.max > 0;
   const ratio = hasKey ? gr.earned / gr.max : 0;
   const remainFrac = timedOut ? 0 : Math.max(0, 1 - elapsed / g.limitMs);
 
-  // Điểm = đúng bao nhiêu × (100 + tối đa 100 điểm thưởng tốc độ) + thưởng chuỗi đúng
-  let pts = ratio > 0 ? Math.round(ratio * (100 + 100 * remainFrac)) : 0;
+  const base = Math.round(ratio * 100);
+  const speed = Math.round(ratio * 100 * remainFrac);
+  let bonus = 0;
   if (ratio === 1) {
     g.streak += 1;
-    pts += Math.min(g.streak - 1, 5) * 10;
+    bonus = Math.min(g.streak - 1, 5) * 10;
   } else if (hasKey) {
     g.streak = 0;
   }
   g.bestStreak = Math.max(g.bestStreak, g.streak);
-  g.times[i] = timedOut ? g.limitMs : elapsed;
+  const pts = base + speed + bonus;
   g.points[i] = pts;
+  g.breakdown[i] = { base, speed, streak: bonus };
   g.totalPoints += pts;
 
+  const detail = `${base} cơ bản${speed ? ` + ${speed} tốc độ` : ""}${bonus ? ` + ${bonus} chuỗi 🔥` : ""}`;
   if (!hasKey) g.lastMsg = "Câu này chưa có đáp án nên không tính điểm.";
-  else if (gr.status === "correct") g.lastMsg = `✅ Chính xác! +${pts} điểm`;
-  else if (gr.status === "partial") {
+  else if (gr.status === "correct") {
+    g.lastMsg = `✅ Chính xác! +${pts} điểm (${detail})`;
+  } else if (gr.status === "partial") {
     g.lastMsg = `⚠️ Đúng ${gr.c}/4 ý, +${pts} điểm. Đáp án: ${keyText(q)}`;
   } else if (timedOut) g.lastMsg = `⏰ Hết giờ! Đáp án: ${keyText(q)}`;
   else g.lastMsg = `❌ Chưa đúng. Đáp án: ${keyText(q)}`;
 
+  const wrong = gr.status === "wrong" || gr.status === "partial";
+  if (wrong) g.lastMsg += " · Bấm “Câu tiếp” khi đã xem xong.";
+
   saveCurrent();
-  renderAnswerArea();
-  renderNav();
-  updateGameBar();
-  updateNavButtons();
+  refreshGameUI(exam);
   typeset([$("answer-mcq"), $("answer-tf"), $("game-feedback")]);
 
+  // Người chơi đã sang câu khác trong lúc chờ chấm: chỉ cập nhật điểm, không đụng giao diện câu mới
+  if (state.idx !== i) return;
+
   clearTimeout(state.gameNextTimer);
-  const wait = ratio === 1 ? GAME_NEXT_DELAY_MS : GAME_NEXT_DELAY_MS + 1500;
-  state.gameNextTimer = setTimeout(gameNext, wait);
+  if (wrong) {
+    // Làm sai: không tự chuyển câu. Hiện giải nhanh để học ngay; có thể bấm giải chi tiết
+    renderExplainPanel();
+    setTab("quick", true);
+  } else {
+    state.gameNextTimer = setTimeout(gameNext, GAME_NEXT_DELAY_MS);
+  }
 }
 
 function gameNext() {
@@ -1912,10 +2288,25 @@ function gameNext() {
   else gameBegin(i + 1);
 }
 
-function finishGame() {
+let finishingGame = false;
+
+async function finishGame() {
   const exam = state.current;
-  const g = exam.game;
+  if (!exam || exam.game?.finished || finishingGame) return;
   clearTimeout(state.gameNextTimer);
+  const waiting = jobsOf(pendingLocks, exam);
+  if (waiting.length) {
+    finishingGame = true;
+    setLoading(true, "AI đang chấm điểm các câu cuối...");
+    try {
+      await Promise.allSettled(waiting);
+    } finally {
+      setLoading(false);
+      finishingGame = false;
+    }
+    if (state.current !== exam) return;
+  }
+  const g = exam.game;
   exam.questions.forEach((q, i) => {
     exam.checked[i] = true;
     if (g.times[i] == null) g.times[i] = 0;
@@ -1959,7 +2350,9 @@ function updateGameBar() {
   const locked = g.times[g.idx] != null;
   const remain = locked
     ? Math.max(0, g.limitMs - g.times[g.idx])
-    : Math.max(0, g.qEndsAt - Date.now());
+    : g.preparing
+      ? g.limitMs
+      : Math.max(0, g.qEndsAt - Date.now());
   const frac = g.limitMs ? remain / g.limitMs : 0;
 
   $("game-q-time").textContent = fmtTime(remain);
@@ -1973,7 +2366,11 @@ function updateGameBar() {
   $("game-streak").textContent = g.streak >= 2 ? `🔥 ${g.streak}` : "";
   $("game-progress-fill").style.width = `${Math.round(frac * 100)}%`;
   $("game-progress-fill").classList.toggle("is-warn", !locked && frac < 0.2);
-  $("game-feedback").textContent = locked ? g.lastMsg || "" : "";
+  $("game-feedback").textContent = locked
+    ? g.lastMsg || ""
+    : g.preparing
+      ? "⏳ AI đang chuẩn bị câu trắc nghiệm... (đồng hồ chạy khi câu sẵn sàng)"
+      : "";
 }
 
 /* ---------- Đồng hồ chung ---------- */
@@ -1992,7 +2389,7 @@ function tick() {
     }
   } else if (m === "game" && !exam.game.finished) {
     const i = exam.game.idx;
-    if (exam.game.times[i] == null) {
+    if (exam.game.times[i] == null && !exam.game.preparing) {
       if (Date.now() >= exam.game.qEndsAt) gameLock(i, true);
       else updateGameBar();
     }
@@ -2061,25 +2458,30 @@ function renderSummary(exam) {
   html += `<div class="summary-stats">${stat(right, "đúng")}${stat(wrong, "sai")}${stat(skipped, "chưa làm")}${
     m !== "quick" ? stat(fmtTime(r.timeMs), "thời gian") : ""
   }</div>`;
+  const fmtRun = (x) =>
+    m === "game"
+      ? `⭐ ${x.points ?? 0} điểm · ${Number(x.score10).toFixed(2)}đ · ${fmtTime(x.timeMs)}`
+      : `${Number(x.score10).toFixed(2)}đ · ${fmtTime(x.timeMs)}`;
   if (m === "game") {
-    html += `<div class="summary-line">⭐ ${r.points} điểm · 🔥 chuỗi đúng dài nhất: ${r.bestStreak}</div>`;
+    const scored = exam.questions.filter(
+      (q) => q.key !== null && q.key !== undefined,
+    ).length;
+    html += `<div class="summary-line">⭐ ${r.points} điểm · 🔥 chuỗi đúng dài nhất: ${r.bestStreak} · 🎯 ${right}/${scored || exam.questions.length} câu đúng</div>`;
   }
   if (m !== "quick") {
     const best = r.top?.[0];
     if (r.isRecord) {
       html += `<div class="record-box is-new">🏆 Kỷ lục mới!${
-        r.prevBest
-          ? ` (kỷ lục cũ: ${Number(r.prevBest.score10).toFixed(2)}đ · ${fmtTime(r.prevBest.timeMs)})`
-          : ""
+        r.prevBest ? ` (kỷ lục cũ: ${fmtRun(r.prevBest)})` : ""
       }</div>`;
     } else if (best) {
-      html += `<div class="record-box">🏅 Kỷ lục hiện tại: ${Number(best.score10).toFixed(2)}đ · ${fmtTime(best.timeMs)}</div>`;
+      html += `<div class="record-box">🏅 Kỷ lục hiện tại: ${fmtRun(best)}</div>`;
     }
     if (r.top?.length) {
       html += `<ol class="record-list">${r.top
         .map(
           (x) =>
-            `<li>${Number(x.score10).toFixed(2)}đ · ${fmtTime(x.timeMs)} · ${new Date(x.at).toLocaleDateString("vi-VN")}</li>`,
+            `<li>${fmtRun(x)} · ${new Date(x.at).toLocaleDateString("vi-VN")}</li>`,
         )
         .join("")}</ol>`;
     }
@@ -2160,14 +2562,23 @@ async function submitExam(opts = {}) {
 
   submitting = true;
   try {
+    // Thi thử: giải nốt các câu thiếu đáp án. Luyện tập nhanh: chỉ chờ các câu đang được kiểm tra.
     const needSolve =
-      fillingNow.has(exam.id) ||
-      (!exam.solveTried &&
-        exam.questions.some((q) => q.key === null || q.key === undefined));
+      m === "mock" &&
+      (fillingNow.has(exam.id) ||
+        (!exam.solveTried &&
+          exam.questions.some((q) => q.key === null || q.key === undefined)));
     if (needSolve) {
       setLoading(true, "AI đang giải các câu chưa có đáp án để chấm điểm...");
       await fillMissingKeys(exam);
       setLoading(false);
+    } else if (m === "quick") {
+      const waiting = jobsOf(prepJobs, exam);
+      if (waiting.length) {
+        setLoading(true, "AI đang kiểm tra các đáp án cuối...");
+        await Promise.allSettled(waiting);
+        setLoading(false);
+      }
     }
     if (state.current !== exam) return;
 
@@ -2319,7 +2730,7 @@ function init() {
   on("clear-files-btn", "click", clearPages);
   on("create-exam-btn", "click", createExam);
   on("back-home-btn", "click", goHome);
-  on("prev-question-btn", "click", () => showQuestion(state.idx - 1));
+  on("prev-question-btn", "click", () => navigateTo(state.idx - 1));
   on("next-question-btn", "click", onNextClick);
   on("submit-exam-btn", "click", () => submitExam());
   on("share-exam-btn", "click", shareExam);
