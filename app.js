@@ -330,6 +330,12 @@ function clamp01(v) {
   return Math.min(1, Math.max(0, v));
 }
 
+// Tách "data:image/jpeg;base64,AAAA" thành chuỗi base64 trần, để gửi lên server
+function stripDataUrl(dataUrl) {
+  const m = String(dataUrl || "").match(/^data:[^;]+;base64,(.+)$/s);
+  return m ? m[1] : null;
+}
+
 // Cắt hình minh họa theo box [ymin, xmin, ymax, xmax] tọa độ 0–1000 trên trang
 function cropFigure(fig, page) {
   if (!fig || typeof fig !== "object" || !Array.isArray(fig.box)) return null;
@@ -1655,6 +1661,8 @@ function explainPayload(exam, i, style) {
     answered: isAnswered(q, exam.answers[i]),
     subject: exam.subject,
     style,
+    // Câu có hình: gửi kèm ảnh để AI giải thích đúng theo hình, không đoán bằng chữ
+    image: q.figureImage ? stripDataUrl(q.figureImage) : undefined,
   };
 }
 
@@ -1770,7 +1778,12 @@ async function sendChat(e) {
       : "Học sinh chưa làm câu này (không được kết luận là em không biết làm; chỉ cần hướng dẫn).",
   ].join("\n");
 
-  const r = await postJSON("/api/chat", { context, history, message });
+  const r = await postJSON("/api/chat", {
+    context,
+    history,
+    message,
+    image: q.figureImage ? stripDataUrl(q.figureImage) : undefined,
+  });
   state.chatting = false;
   $("chat-send-btn").disabled = false;
   if (state.current !== exam) return;
@@ -1793,10 +1806,15 @@ async function doFillMissingKeys(exam) {
     .filter(({ q }) => q.key === null || q.key === undefined);
   if (!missing.length || exam.solveTried) return 0;
 
-  const chunks = [];
-  for (let k = 0; k < missing.length; k += 10) {
-    chunks.push(missing.slice(k, k + 10));
+  // Câu có ảnh minh họa: gửi RIÊNG từng câu kèm ảnh (AI cần nhìn hình mới giải đúng).
+  // Câu chỉ có chữ: gộp theo lô 10 câu/lần như cũ để đỡ tốn lượt gọi.
+  const withImage = missing.filter(({ q }) => q.figureImage);
+  const textOnly = missing.filter(({ q }) => !q.figureImage);
+  const chunks = [...withImage.map((m) => [m])];
+  for (let k = 0; k < textOnly.length; k += 10) {
+    chunks.push(textOnly.slice(k, k + 10));
   }
+
   let filled = 0;
   let allOk = true;
   await runPool(chunks, 2, async (chunk) => {
@@ -1808,6 +1826,7 @@ async function doFillMissingKeys(exam) {
         text: q.text,
         options: q.options,
         statements: q.statements,
+        image: q.figureImage ? stripDataUrl(q.figureImage) : undefined,
       })),
     });
     if (!r.ok) {
@@ -1873,9 +1892,10 @@ function needsPrep(q) {
   return q.key === null || q.key === undefined;
 }
 
-// AI giải bằng chữ nên không đoán những câu phải nhìn hình mới làm được
+// Câu cần nhìn hình mới giải được NHƯNG không có ảnh nào để gửi kèm thì đành chịu, không đoán bừa.
+// Có figureImage (dù là hình cắt riêng hay cả trang) thì vẫn gửi kèm ảnh để AI tự giải.
 function needsFigureToSolve(q) {
-  return !!(q.figure || q.figureImage);
+  return !q.figureImage && !!(q.figure || needsFigure(q.text));
 }
 
 // Câu tự luận (kiểu "short" chưa có đáp án) phải chờ AI dựng phương án trước khi làm
@@ -1940,6 +1960,8 @@ function prepareQuestion(exam, i) {
             options: q.options,
             statements: q.statements,
             convert: q.type === "short",
+            // Câu có hình: gửi kèm ảnh để AI nhìn và giải đúng, tránh đoán mò bằng chữ
+            image: q.figureImage ? stripDataUrl(q.figureImage) : undefined,
           },
         ],
       },

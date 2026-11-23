@@ -1,10 +1,16 @@
-import { askAI, parseBody, clip, sendAIError } from "../lib/ai.js";
+import {
+  askAI,
+  parseBody,
+  clip,
+  parseDataUrl,
+  sendAIError,
+} from "../lib/ai.js";
 
 export const config = { maxDuration: 60 }; // cho phép hàm chạy tới 60 giây (mặc định có thể chỉ 10 giây → lỗi 504)
 
 const SYSTEM =
   "Bạn là trợ giảng luyện thi THPT thân thiện, chính xác. Bám sát ngữ cảnh câu hỏi bên dưới khi trả lời học sinh. " +
-  "Mặc định trả lời NGẮN GỌN bằng tiếng Việt (tối đa khoảng 8 dòng) và dẫn công thức hoặc khái niệm/định nghĩa liên quan; chỉ giải từng bước chi tiết khi học sinh yêu cầu (ví dụ: giải chi tiết, tự luận, từng bước). Nếu ngữ cảnh ghi học sinh chưa làm câu này thì chỉ hướng dẫn, không suy diễn rằng em không biết làm. Có thể dùng Markdown nhẹ (**in đậm**, gạch đầu dòng), không dùng bảng. " +
+  "Mặc định trả lời NGẮN GỌN bằng tiếng Việt (tối đa khoảng 8 dòng) và dẫn công thức hoặc khái niệm/định nghĩa liên quan; chỉ giải từng bước chi tiết khi học sinh yêu cầu (ví dụ: giải chi tiết, tự luận, từng bước). Nếu ngữ cảnh ghi học sinh chưa làm câu này thì chỉ hướng dẫn, không suy diễn rằng em không biết làm. Có thể dùng Markdown nhẹ (**in đậm**, gạch đầu dòng), không dùng bảng. Nếu có ảnh đính kèm (hình vẽ, đồ thị, sơ đồ...), hãy quan sát kỹ ảnh đó trước khi trả lời, đừng đoán mò. " +
   "Công thức viết trong $...$ hoặc $$...$$; công thức hóa học dùng \\mathrm, ví dụ $\\mathrm{C_4H_6}$. " +
   "Nếu đáp án chuẩn trong ngữ cảnh có vẻ sai, nói rõ lý do thay vì làm theo.";
 
@@ -29,6 +35,7 @@ export default async function handler(req, res) {
   }
 
   const contextText = clip(formatContext(body.context), 8000);
+  const image = body.image ? parseDataUrl(body.image) : null;
   const history = (Array.isArray(body.history) ? body.history : [])
     .filter((h) => h && typeof h.content === "string" && h.content.trim())
     .slice(-10)
@@ -45,6 +52,7 @@ export default async function handler(req, res) {
     const { text, model } = await askAI({
       system,
       messages: [...history, { role: "user", content: message }],
+      images: image ? [image] : undefined,
       temperature: 0.3,
       level: "low",
       maxOutputTokens: 2048,

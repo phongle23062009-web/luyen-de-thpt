@@ -1,9 +1,18 @@
 export const config = { maxDuration: 60 }; // cho phép hàm chạy tới 60 giây (mặc định có thể chỉ 10 giây → lỗi 504)
-import { askAI, parseBody, clip, sendAIError } from "../lib/ai.js";
+
+import {
+  askAI,
+  parseBody,
+  clip,
+  parseDataUrl,
+  sendAIError,
+} from "../lib/ai.js";
 
 const BASE =
   "Bạn là gia sư luyện thi THPT, trả lời bằng tiếng Việt. Viết công thức bằng LaTeX trong $...$ " +
   "(công thức hóa học dùng \\mathrm, ví dụ $\\mathrm{C_4H_6}$). " +
+  "Nếu có ảnh đính kèm (hình vẽ, đồ thị, sơ đồ...), hãy QUAN SÁT KỸ ảnh đó trước khi giải thích; " +
+  "đáp án chuẩn cho sẵn (nếu có) đã được xác định đúng theo ảnh, đừng tự suy ra đáp án khác mà không dựa vào ảnh. " +
   "Đối chiếu với đáp án chuẩn; nếu đáp án chuẩn có vẻ sai, nói rõ lý do. " +
   "Chỉ nhận xét dựa trên bài làm thật sự của học sinh. Nếu học sinh CHƯA làm câu này thì tuyệt đối không nhận xét năng lực, " +
   "không nói em không biết làm hay không làm được; chỉ ghi một câu ngắn là em chưa làm câu này rồi trình bày lời giải để tham khảo. " +
@@ -31,6 +40,7 @@ export default async function handler(req, res) {
   const style =
     body.style === "detail" || body.mode === "essay" ? "detail" : "quick";
   const answered = body.answered !== false; // client cũ không gửi cờ này thì coi như đã làm
+  const image = body.image ? parseDataUrl(body.image) : null;
   if (!question.trim()) {
     return res.status(400).json({ error: "empty_input" });
   }
@@ -46,9 +56,10 @@ export default async function handler(req, res) {
       messages: [
         {
           role: "user",
-          content: `Môn: ${subject}\nĐề:\n${question}\nĐáp án chuẩn: ${key}\n${task}`,
+          content: `Môn: ${subject}\nĐề:\n${question}${image ? "\n(Xem ảnh đính kèm)" : ""}\nĐáp án chuẩn: ${key}\n${task}`,
         },
       ],
+      images: image ? [image] : undefined,
       temperature: 0.3,
       level: "low",
       maxOutputTokens: style === "detail" ? 3072 : 1024,
