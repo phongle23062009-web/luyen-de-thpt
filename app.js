@@ -1200,6 +1200,8 @@ function openExam(exam) {
   $("home-view").classList.remove("active");
   setHidden($("exam-view"), false);
   $("exam-view").classList.add("active");
+  document.body.dataset.view = "exam";
+  setNavOpen(false);
 
   saveCurrent();
   if (exam.mode === "game" && !finished) gameBegin(state.idx);
@@ -1267,6 +1269,12 @@ function showQuestion(i) {
 
   warmQuestion(exam, idx);
 
+  const sig = `${exam.id}:${idx}`;
+  if (sig !== lastShownSig) {
+    lastShownSig = sig;
+    scrollToQuestionTop();
+  }
+
   // Sau khi nộp bài thi thử: tự hiện lời giải nhanh khi xem lại. Trò chơi: chỉ với câu làm sai.
   if (modeOf(exam) !== "quick" && isFinished(exam)) {
     const g = gradeQuestion(q, exam.answers[idx]);
@@ -1294,6 +1302,7 @@ function navigateTo(i) {
   if (!exam) return;
   const k = Math.max(0, Math.min(i, exam.questions.length - 1));
   prepFailed.delete(prepId(exam, k));
+  setNavOpen(false);
   showQuestion(k);
 }
 
@@ -1471,9 +1480,81 @@ function renderNav() {
     bar.appendChild(btn);
   });
 
-  bar
-    .querySelector(".is-current")
-    ?.scrollIntoView({ block: "nearest", inline: "center" });
+  const pos = $("nav-pos");
+  if (pos) pos.textContent = `${state.idx + 1}/${exam.questions.length}`;
+  centerCurrentChip();
+}
+
+/* ============ Giao diện: thanh số câu, bố cục điện thoại ============ */
+
+function isMobileLayout() {
+  const l = document.body.dataset.layout;
+  return (
+    l === "mobile" ||
+    (l !== "desktop" && window.matchMedia("(max-width: 820px)").matches)
+  );
+}
+
+// Cuộn riêng trong thanh số câu (không dùng scrollIntoView vì nó kéo cả trang)
+function centerCurrentChip() {
+  const bar = $("question-nav-bar");
+  const chip = bar?.querySelector(".is-current");
+  if (!bar || !chip) return;
+  const b = bar.getBoundingClientRect();
+  const c = chip.getBoundingClientRect();
+  if (!b.width) return;
+  bar.scrollLeft += c.left + c.width / 2 - (b.left + b.width / 2);
+  bar.scrollTop += c.top + c.height / 2 - (b.top + b.height / 2);
+}
+
+// Đo chiều cao header / thanh trên để các phần dính (sticky) không đè lên nhau
+function syncLayoutVars() {
+  const root = document.documentElement.style;
+  const header = document.querySelector(".app-header");
+  if (header && header.offsetHeight) {
+    root.setProperty("--header-h", header.offsetHeight + "px");
+  }
+  const bar = $("exam-topbar");
+  if (bar && bar.offsetHeight) {
+    root.setProperty("--topbar-h", bar.offsetHeight + "px");
+  }
+  const strip = $("nav-strip");
+  if (strip && strip.offsetHeight && isMobileLayout()) {
+    root.setProperty("--strip-h", strip.offsetHeight + "px");
+  }
+}
+
+// Mở / thu gọn bảng số câu (điện thoại)
+function setNavOpen(open) {
+  const strip = $("nav-strip");
+  const btn = $("nav-toggle-btn");
+  if (!strip || !btn) return;
+  strip.classList.toggle("nav-open", !!open);
+  btn.setAttribute("aria-expanded", String(!!open));
+  if (open) centerCurrentChip();
+  syncLayoutVars();
+}
+
+function toggleChat() {
+  const panel = $("chat-panel");
+  if (!panel) return;
+  const collapsed = panel.classList.toggle("is-collapsed");
+  $("chat-header")?.setAttribute("aria-expanded", String(!collapsed));
+  if (!collapsed) $("chat-input")?.focus({ preventScroll: false });
+}
+
+let lastShownSig = "";
+// Chuyển sang câu khác trên điện thoại: đưa phần câu hỏi lên đầu màn hình
+function scrollToQuestionTop() {
+  if (!isMobileLayout()) return;
+  const pane = $("left-pane");
+  if (!pane) return;
+  const strip = $("nav-strip");
+  const offset = (strip ? strip.offsetHeight : 0) + 8;
+  const top = pane.getBoundingClientRect().top;
+  if (top < offset) {
+    window.scrollTo({ top: window.scrollY + top - offset, behavior: "smooth" });
+  }
 }
 
 function renderResult() {
@@ -2416,6 +2497,12 @@ function applyModeUI(exam) {
   const badge = $("exam-mode-badge");
   if (badge) badge.textContent = MODE_LABEL[m];
 
+  const view = $("exam-view");
+  if (view) {
+    view.dataset.mode = m;
+    view.dataset.playing = String(playingGame);
+  }
+
   renderSummary(exam);
   updateTimerChip();
   updateGameBar();
@@ -2688,6 +2775,8 @@ function goHome() {
   $("exam-view").classList.remove("active");
   setHidden($("home-view"), false);
   $("home-view").classList.add("active");
+  document.body.dataset.view = "home";
+  setNavOpen(false);
   renderRecent();
   window.scrollTo(0, 0);
 }
@@ -2702,6 +2791,7 @@ function applyLayout(mode) {
   } catch {
     /* bỏ qua nếu không lưu được */
   }
+  requestAnimationFrame(syncLayoutVars);
 }
 
 /* ============ Khởi động ============ */
@@ -2734,6 +2824,46 @@ function init() {
   on("next-question-btn", "click", onNextClick);
   on("submit-exam-btn", "click", () => submitExam());
   on("share-exam-btn", "click", shareExam);
+  document.body.dataset.view = "home";
+
+  // Thanh số câu (điện thoại): nút mở/thu gọn, bấm ra ngoài hoặc Esc để đóng
+  on("nav-toggle-btn", "click", () =>
+    setNavOpen(!$("nav-strip").classList.contains("nav-open")),
+  );
+  $("nav-strip")?.addEventListener("click", (e) => {
+    if (e.target.closest(".exam-topbar-actions .btn")) setNavOpen(false);
+  });
+  document.addEventListener("click", (e) => {
+    const strip = $("nav-strip");
+    if (strip?.classList.contains("nav-open") && !strip.contains(e.target)) {
+      setNavOpen(false);
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setNavOpen(false);
+  });
+
+  // Khung chat: thu gọn mặc định để không chiếm chỗ (chỉ có tác dụng trên điện thoại)
+  $("chat-panel")?.classList.add("is-collapsed");
+  $("chat-header")?.setAttribute("aria-expanded", String(!isMobileLayout()));
+  on("chat-header", "click", toggleChat);
+  $("chat-header")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      toggleChat();
+    }
+  });
+
+  if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => syncLayoutVars());
+    [".app-header", "#exam-topbar", "#nav-strip"].forEach((sel) => {
+      const el = document.querySelector(sel);
+      if (el) ro.observe(el);
+    });
+  }
+  window.addEventListener("resize", syncLayoutVars);
+  syncLayoutVars();
+
   on("explain-current-btn", "click", explainCurrent);
   on("tab-essay", "click", () => setTab("essay"));
   on("tab-quick", "click", () => setTab("quick"));

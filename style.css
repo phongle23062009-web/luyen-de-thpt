@@ -983,3 +983,550 @@ body[data-layout="desktop"] .exam-workspace {
   cursor: default;
   opacity: 0.85;
 }
+
+/* ================================================================
+   Nâng cấp giao diện: thanh số câu thu gọn, thanh điều hướng dưới,
+   sửa khoảng trống ở khung giải thích, không bị header che
+   ================================================================ */
+:root {
+  --header-h: 56px; /* được app.js đo lại theo thực tế */
+  --topbar-h: 64px;
+  --strip-h: 52px;
+}
+
+/* Khoảng trống lớn ở khung giải thích: pre-wrap làm hiện các dòng trắng giữa các thẻ HTML */
+.explanation-body {
+  white-space: normal;
+}
+.quick-detail,
+#content-essay {
+  white-space: pre-wrap;
+}
+
+/* Máy tính: thanh trên dính ngay dưới header (trước đây bị header che) */
+.exam-topbar {
+  top: var(--header-h);
+}
+.left-pane {
+  top: calc(var(--header-h) + var(--topbar-h) + 12px);
+}
+.nav-strip {
+  display: contents;
+}
+.nav-toggle {
+  display: none;
+}
+.exam-nav-info {
+  order: 1;
+  flex: 1 1 auto;
+}
+.exam-timer {
+  order: 1;
+}
+.exam-topbar-actions {
+  order: 2;
+}
+.question-nav-bar {
+  order: 3;
+  flex: 1 1 100%; /* hàng riêng bên dưới, tối đa 2 hàng ô, nhiều hơn thì cuộn */
+  max-height: 84px;
+  overflow-y: auto;
+}
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.chat-chev {
+  display: none;
+}
+
+/* ===== Điện thoại: chế độ "Điện thoại" thủ công ===== */
+/* Header gọn, không dính (nhường chỗ cho thanh số câu) */
+body[data-layout="mobile"] .app-header {
+  position: static;
+  flex-wrap: nowrap;
+  gap: 8px;
+  padding: calc(8px + env(safe-area-inset-top)) 12px 8px;
+}
+body[data-layout="mobile"] .logo {
+  font-size: 16px;
+  white-space: nowrap;
+}
+body[data-layout="mobile"] .layout-btn {
+  padding: 6px 9px;
+  font-size: 12px;
+}
+body[data-layout="mobile"] .app-main {
+  padding: 10px 10px 40px;
+}
+body[data-layout="mobile"][data-view="exam"] .app-main {
+  padding-bottom: calc(86px + env(safe-area-inset-bottom));
+}
+body[data-layout="mobile"] input[type="text"],
+body[data-layout="mobile"] input[type="number"],
+body[data-layout="mobile"] textarea,
+body[data-layout="mobile"] select {
+  font-size: 16px;
+}
+
+/* Thông tin đề (cuộn đi khi kéo xuống) */
+body[data-layout="mobile"] .exam-topbar {
+  display: contents;
+}
+body[data-layout="mobile"] .exam-nav-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+body[data-layout="mobile"] .exam-title {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body[data-layout="mobile"] .save-status {
+  display: none;
+}
+
+/* Thanh số câu: dính trên cùng, một hàng cuộn ngang; bấm nút để mở cả bảng */
+body[data-layout="mobile"] .nav-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  margin: 0 -10px 10px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+}
+body[data-layout="mobile"] .nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 38px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+body[data-layout="mobile"] .nav-toggle-chev {
+  transition: transform 0.2s;
+}
+body[data-layout="mobile"] .nav-strip.nav-open .nav-toggle-chev {
+  transform: rotate(180deg);
+}
+body[data-layout="mobile"] .exam-timer {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+body[data-layout="mobile"] .question-nav-bar {
+  flex: 1 1 0;
+  min-width: 0;
+  flex-wrap: nowrap;
+  max-height: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  gap: 2px;
+  padding: 4px;
+}
+body[data-layout="mobile"] .question-nav-bar::-webkit-scrollbar {
+  display: none;
+}
+body[data-layout="mobile"] .q-chip {
+  flex: none;
+  scroll-snap-align: center;
+  min-width: 38px;
+  height: 38px;
+  margin: 0;
+}
+body[data-layout="mobile"] .nav-strip.nav-open .question-nav-bar {
+  order: 3;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  max-height: 46vh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  gap: 6px;
+  padding: 4px 0;
+}
+body[data-layout="mobile"] .nav-strip.nav-open .q-chip {
+  min-width: 42px;
+  height: 42px;
+}
+body[data-layout="mobile"] .exam-topbar-actions {
+  display: none;
+}
+body[data-layout="mobile"] .nav-strip.nav-open .exam-topbar-actions {
+  display: flex;
+  order: 4;
+  flex: 1 1 100%;
+  gap: 8px;
+  padding-top: 4px;
+}
+body[data-layout="mobile"] .nav-strip.nav-open .exam-topbar-actions .btn {
+  flex: 1;
+  min-height: 42px;
+}
+body[data-layout="mobile"] #exam-view[data-playing="true"] .question-nav-bar {
+  display: none;
+}
+body[data-layout="mobile"] #exam-view[data-playing="true"] .nav-toggle {
+  flex: 1;
+  justify-content: space-between;
+}
+
+/* Khung câu hỏi và đáp án */
+body[data-layout="mobile"] .pane {
+  padding: 14px 12px;
+}
+body[data-layout="mobile"] .game-bar {
+  position: sticky;
+  top: var(--strip-h);
+  z-index: 30;
+  margin-top: 4px;
+  padding: 8px 10px;
+}
+body[data-layout="mobile"] .game-feedback:empty {
+  display: none;
+}
+body[data-layout="mobile"] .game-time {
+  font-size: 1.25rem;
+}
+body[data-layout="mobile"] .opt {
+  min-height: 48px;
+  padding: 12px;
+}
+body[data-layout="mobile"] .tf-btns .opt {
+  flex: 1;
+  justify-content: center;
+}
+
+/* Nút Câu trước / Câu tiếp luôn nằm sát đáy màn hình */
+body[data-layout="mobile"] .question-footer-nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 45;
+  margin: 0;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -4px 14px rgba(15, 23, 42, 0.1);
+}
+body[data-layout="mobile"] .question-footer-nav .btn {
+  flex: 1;
+  min-height: 46px;
+  font-size: 15px;
+}
+body[data-layout="mobile"]:has(.chat-input:focus) .question-footer-nav {
+  display: none;
+}
+
+/* Giải thích và chat: không cuộn lồng nhau, chat thu gọn được */
+body[data-layout="mobile"] .explanation-body {
+  max-height: none;
+  overflow: visible;
+  min-height: 0;
+}
+body[data-layout="mobile"] .chat-header {
+  cursor: pointer;
+}
+body[data-layout="mobile"] .chat-chev {
+  display: inline-block;
+  transition: transform 0.2s;
+}
+body[data-layout="mobile"] .chat-panel.is-collapsed .chat-chev {
+  transform: rotate(-90deg);
+}
+body[data-layout="mobile"] .chat-panel.is-collapsed .chat-messages,
+body[data-layout="mobile"] .chat-panel.is-collapsed .chat-form {
+  display: none;
+}
+body[data-layout="mobile"] .chat-panel.is-collapsed .chat-header {
+  border-bottom: 0;
+}
+body[data-layout="mobile"] .chat-messages {
+  max-height: 220px;
+}
+body[data-layout="mobile"] .toast-container {
+  left: 10px;
+  right: 10px;
+  bottom: calc(74px + env(safe-area-inset-bottom));
+  align-items: stretch;
+  max-width: none;
+}
+body[data-layout="mobile"] .toast {
+  max-width: none;
+}
+
+/* ===== Điện thoại: tự động theo độ rộng màn hình ===== */
+@media (max-width: 820px) {
+  /* Header gọn, không dính (nhường chỗ cho thanh số câu) */
+  body:not([data-layout="desktop"]) .app-header {
+    position: static;
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: calc(8px + env(safe-area-inset-top)) 12px 8px;
+  }
+  body:not([data-layout="desktop"]) .logo {
+    font-size: 16px;
+    white-space: nowrap;
+  }
+  body:not([data-layout="desktop"]) .layout-btn {
+    padding: 6px 9px;
+    font-size: 12px;
+  }
+  body:not([data-layout="desktop"]) .app-main {
+    padding: 10px 10px 40px;
+  }
+  body:not([data-layout="desktop"])[data-view="exam"] .app-main {
+    padding-bottom: calc(86px + env(safe-area-inset-bottom));
+  }
+  body:not([data-layout="desktop"]) input[type="text"],
+  body:not([data-layout="desktop"]) input[type="number"],
+  body:not([data-layout="desktop"]) textarea,
+  body:not([data-layout="desktop"]) select {
+    font-size: 16px;
+  }
+
+  /* Thông tin đề (cuộn đi khi kéo xuống) */
+  body:not([data-layout="desktop"]) .exam-topbar {
+    display: contents;
+  }
+  body:not([data-layout="desktop"]) .exam-nav-info {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  body:not([data-layout="desktop"]) .exam-title {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  body:not([data-layout="desktop"]) .save-status {
+    display: none;
+  }
+
+  /* Thanh số câu: dính trên cùng, một hàng cuộn ngang; bấm nút để mở cả bảng */
+  body:not([data-layout="desktop"]) .nav-strip {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 8px;
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    margin: 0 -10px 10px;
+    padding: 6px 10px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+  }
+  body:not([data-layout="desktop"]) .nav-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    height: 38px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid var(--primary);
+    background: var(--primary-soft);
+    color: var(--primary);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  body:not([data-layout="desktop"]) .nav-toggle-chev {
+    transition: transform 0.2s;
+  }
+  body:not([data-layout="desktop"]) .nav-strip.nav-open .nav-toggle-chev {
+    transform: rotate(180deg);
+  }
+  body:not([data-layout="desktop"]) .exam-timer {
+    flex: none;
+    padding: 4px 10px;
+    font-size: 13px;
+  }
+  body:not([data-layout="desktop"]) .question-nav-bar {
+    flex: 1 1 0;
+    min-width: 0;
+    flex-wrap: nowrap;
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    gap: 2px;
+    padding: 4px;
+  }
+  body:not([data-layout="desktop"]) .question-nav-bar::-webkit-scrollbar {
+    display: none;
+  }
+  body:not([data-layout="desktop"]) .q-chip {
+    flex: none;
+    scroll-snap-align: center;
+    min-width: 38px;
+    height: 38px;
+    margin: 0;
+  }
+  body:not([data-layout="desktop"]) .nav-strip.nav-open .question-nav-bar {
+    order: 3;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    max-height: 46vh;
+    overflow-x: hidden;
+    overflow-y: auto;
+    gap: 6px;
+    padding: 4px 0;
+  }
+  body:not([data-layout="desktop"]) .nav-strip.nav-open .q-chip {
+    min-width: 42px;
+    height: 42px;
+  }
+  body:not([data-layout="desktop"]) .exam-topbar-actions {
+    display: none;
+  }
+  body:not([data-layout="desktop"]) .nav-strip.nav-open .exam-topbar-actions {
+    display: flex;
+    order: 4;
+    flex: 1 1 100%;
+    gap: 8px;
+    padding-top: 4px;
+  }
+  body:not([data-layout="desktop"])
+    .nav-strip.nav-open
+    .exam-topbar-actions
+    .btn {
+    flex: 1;
+    min-height: 42px;
+  }
+  body:not([data-layout="desktop"])
+    #exam-view[data-playing="true"]
+    .question-nav-bar {
+    display: none;
+  }
+  body:not([data-layout="desktop"])
+    #exam-view[data-playing="true"]
+    .nav-toggle {
+    flex: 1;
+    justify-content: space-between;
+  }
+
+  /* Khung câu hỏi và đáp án */
+  body:not([data-layout="desktop"]) .pane {
+    padding: 14px 12px;
+  }
+  body:not([data-layout="desktop"]) .game-bar {
+    position: sticky;
+    top: var(--strip-h);
+    z-index: 30;
+    margin-top: 4px;
+    padding: 8px 10px;
+  }
+  body:not([data-layout="desktop"]) .game-feedback:empty {
+    display: none;
+  }
+  body:not([data-layout="desktop"]) .game-time {
+    font-size: 1.25rem;
+  }
+  body:not([data-layout="desktop"]) .opt {
+    min-height: 48px;
+    padding: 12px;
+  }
+  body:not([data-layout="desktop"]) .tf-btns .opt {
+    flex: 1;
+    justify-content: center;
+  }
+
+  /* Nút Câu trước / Câu tiếp luôn nằm sát đáy màn hình */
+  body:not([data-layout="desktop"]) .question-footer-nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 45;
+    margin: 0;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -4px 14px rgba(15, 23, 42, 0.1);
+  }
+  body:not([data-layout="desktop"]) .question-footer-nav .btn {
+    flex: 1;
+    min-height: 46px;
+    font-size: 15px;
+  }
+  body:not([data-layout="desktop"]):has(.chat-input:focus)
+    .question-footer-nav {
+    display: none;
+  }
+
+  /* Giải thích và chat: không cuộn lồng nhau, chat thu gọn được */
+  body:not([data-layout="desktop"]) .explanation-body {
+    max-height: none;
+    overflow: visible;
+    min-height: 0;
+  }
+  body:not([data-layout="desktop"]) .chat-header {
+    cursor: pointer;
+  }
+  body:not([data-layout="desktop"]) .chat-chev {
+    display: inline-block;
+    transition: transform 0.2s;
+  }
+  body:not([data-layout="desktop"]) .chat-panel.is-collapsed .chat-chev {
+    transform: rotate(-90deg);
+  }
+  body:not([data-layout="desktop"]) .chat-panel.is-collapsed .chat-messages,
+  body:not([data-layout="desktop"]) .chat-panel.is-collapsed .chat-form {
+    display: none;
+  }
+  body:not([data-layout="desktop"]) .chat-panel.is-collapsed .chat-header {
+    border-bottom: 0;
+  }
+  body:not([data-layout="desktop"]) .chat-messages {
+    max-height: 220px;
+  }
+  body:not([data-layout="desktop"]) .toast-container {
+    left: 10px;
+    right: 10px;
+    bottom: calc(74px + env(safe-area-inset-bottom));
+    align-items: stretch;
+    max-width: none;
+  }
+  body:not([data-layout="desktop"]) .toast {
+    max-width: none;
+  }
+}
