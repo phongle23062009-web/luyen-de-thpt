@@ -272,7 +272,7 @@
       </section>
 
       <section id="exam-view" class="view-section hidden">
-        <div class="exam-topbar">
+        <div class="exam-topbar" id="exam-topbar">
           <div class="exam-nav-info">
             <button type="button" id="back-home-btn" class="btn btn-sm">
               ← Trang chủ
@@ -280,28 +280,42 @@
             <span id="exam-title" class="exam-title">Đề luyện tập</span>
             <span id="save-status" class="save-status">Đã lưu tự động</span>
             <span id="exam-mode-badge" class="mode-badge">Luyện tập nhanh</span>
-            <span id="exam-timer" class="exam-timer hidden"></span>
           </div>
-          <div
-            id="question-nav-bar"
-            class="question-nav-bar"
-            aria-label="Danh sách câu hỏi"
-          ></div>
-          <div class="exam-topbar-actions">
+          <div class="nav-strip" id="nav-strip">
             <button
               type="button"
-              id="share-exam-btn"
-              class="btn btn-sm btn-outline"
+              id="nav-toggle-btn"
+              class="nav-toggle"
+              aria-expanded="false"
+              aria-controls="question-nav-bar"
+              title="Mở / thu gọn danh sách câu hỏi"
             >
-              Chia sẻ đề
+              <span class="nav-toggle-icon" aria-hidden="true">▦</span>
+              <span>Câu <b id="nav-pos">1/1</b></span>
+              <span class="nav-toggle-chev" aria-hidden="true">▾</span>
             </button>
-            <button
-              type="button"
-              id="submit-exam-btn"
-              class="btn btn-sm btn-primary"
-            >
-              Nộp bài
-            </button>
+            <span id="exam-timer" class="exam-timer hidden"></span>
+            <div
+              id="question-nav-bar"
+              class="question-nav-bar"
+              aria-label="Danh sách câu hỏi"
+            ></div>
+            <div class="exam-topbar-actions">
+              <button
+                type="button"
+                id="share-exam-btn"
+                class="btn btn-sm btn-outline"
+              >
+                Chia sẻ đề
+              </button>
+              <button
+                type="button"
+                id="submit-exam-btn"
+                class="btn btn-sm btn-primary"
+              >
+                Nộp bài
+              </button>
+            </div>
           </div>
         </div>
 
@@ -420,8 +434,15 @@
             </div>
 
             <div id="chat-panel" class="chat-panel">
-              <div class="chat-header">
+              <div
+                class="chat-header"
+                id="chat-header"
+                role="button"
+                tabindex="0"
+                aria-expanded="true"
+              >
                 <span>Hỏi thêm gia sư AI về câu này</span>
+                <span class="chat-chev" aria-hidden="true">▾</span>
               </div>
               <div id="chat-messages" class="chat-messages"></div>
               <form id="chat-form" class="chat-form">
