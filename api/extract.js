@@ -279,7 +279,7 @@ function buildPrompt({
     '- "mcq": có 4 lựa chọn A, B, C, D, chỉ 1 đáp án đúng. Điền options = {A, B, C, D}.',
     isShort
       ? "- Định dạng đề này CHỈ gồm trắc nghiệm: mọi câu đều phải là mcq (không dùng tf hay short)."
-      : '- "tf": có 4 ý a, b, c, d, mỗi ý Đúng hoặc Sai. Điền statements = {a, b, c, d} (thiếu ý thì để chuỗi rỗng).',
+      : '- "tf": một câu có lời dẫn chung và 4 ý a, b, c, d là các khẳng định, mỗi ý Đúng hoặc Sai. prompt = lời dẫn chung của câu; statements = {a, b, c, d} là nội dung từng ý (thiếu ý thì để chuỗi rỗng). Luôn giữ NGUYÊN MỘT câu tf, KHÔNG tách mỗi ý thành câu riêng.',
     isShort
       ? ""
       : '- "short": yêu cầu điền kết quả (số hoặc chữ ngắn), KHÔNG có lựa chọn A–D, không điền options.',
@@ -291,7 +291,7 @@ function buildPrompt({
     "1. Đọc kỹ TOÀN BỘ trang ảnh và văn bản. Lấy mọi câu hỏi/bài tập có thể làm thành câu luyện tập, không bỏ sót câu ở cuối trang hay câu có nhiều ý con.",
     "2. Câu ĐÃ có dạng trắc nghiệm trong tài liệu: giữ nguyên nội dung và phân loại đúng mcq / tf / short.",
     "3. Câu CHƯA có dạng trắc nghiệm (bài tập tự luận: Tìm, Tính, Giải, Rút gọn, Hoàn thành phương trình phản ứng, ...) thì TỰ CHUYỂN thành câu luyện tập:",
-    '   - Bài có nhiều ý a), b), c), ...: tách MỖI Ý thành một câu riêng. Phần prompt phải đủ ngữ cảnh để hiểu độc lập, ví dụ: "Bài 1a. Tìm nguyên hàm của hàm số $f(x) = x^4$."',
+    '   - Bài tự luận có nhiều ý a), b), c), ... mà MỖI Ý là một yêu cầu tìm hoặc tính: tách MỖI Ý thành một câu riêng. Phần prompt phải đủ ngữ cảnh để hiểu độc lập, ví dụ: "Bài 1a. Tìm nguyên hàm của hàm số $f(x) = x^4$." KHÔNG tách các ý a, b, c, d của câu đúng/sai (tf): giữ NGUYÊN MỘT câu tf.',
     isShort
       ? "   - Tự giải rồi viết 4 phương án: 1 đúng + 3 nhiễu hợp lý (dựa trên lỗi sai thường gặp như sai dấu, quên hệ số, sai chỉ số, quên hằng số C). Đặt đáp án đúng ở vị trí NGẪU NHIÊN trong A–D."
       : "   - Kết quả là MỘT SỐ duy nhất: dùng short (answer là số).",
@@ -308,8 +308,8 @@ function buildPrompt({
     "NHIỆM VỤ (tách đề, CHẾ ĐỘ NHANH):",
     "1. Đọc kỹ TOÀN BỘ trang ảnh và văn bản. Lấy mọi câu hỏi/bài tập, không bỏ sót câu ở cuối trang hay câu có nhiều ý con.",
     "2. Chỉ CHÉP LẠI đề đúng như tài liệu. KHÔNG giải bài, KHÔNG tính toán, KHÔNG tự tạo phương án trả lời. Việc giải sẽ do bước khác đảm nhiệm.",
-    '3. Phân loại: "mcq" nếu tài liệu có sẵn lựa chọn A–D; "tf" nếu có sẵn các ý a–d cần xét Đúng/Sai; "short" cho MỌI câu còn lại (không có lựa chọn), kể cả bài tự luận kiểu Tìm, Tính, Giải, Rút gọn, Hoàn thành phương trình.',
-    '4. Bài có nhiều ý a), b), c), ...: tách MỖI Ý thành một câu "short" riêng. Phần prompt phải đủ ngữ cảnh để hiểu độc lập, ví dụ: "Bài 1a. Tìm nguyên hàm của hàm số $f(x) = x^4$."',
+    '3. Phân loại: "mcq" nếu tài liệu có sẵn lựa chọn A–D; "tf" nếu câu có lời dẫn chung kèm các ý a), b), c), d) là những KHẲNG ĐỊNH cần xét Đúng hay Sai (thường có câu "trong mỗi ý a), b), c), d) thí sinh chọn đúng hoặc sai"); "short" cho các câu còn lại (không có lựa chọn), kể cả bài tự luận kiểu Tìm, Tính, Giải, Rút gọn, Hoàn thành phương trình.',
+    '4. QUY TẮC TÁCH Ý: CHỈ tách khi bài tự luận có nhiều ý a), b), c)... và MỖI Ý là một yêu cầu tìm hoặc tính (Tìm, Tính, Giải, ...): khi đó tách mỗi ý thành một câu "short" riêng, prompt đủ ngữ cảnh để hiểu độc lập, ví dụ: "Bài 1a. Tìm nguyên hàm của hàm số $f(x) = x^4$." TUYỆT ĐỐI KHÔNG tách các ý a, b, c, d của câu đúng/sai (tf): luôn giữ NGUYÊN MỘT câu tf, prompt là lời dẫn chung của câu, statements = {a, b, c, d} là nội dung từng ý.',
     "5. BỎ QUA: lý thuyết/công thức cần nhớ, tiêu đề, bảng cần điền, lời dẫn, và yêu cầu không có đáp án ngắn (chứng minh, vẽ đồ thị, giải thích dài). Nếu một câu lặp lại y nguyên trên cùng trang thì chỉ lấy một lần.",
   ];
 

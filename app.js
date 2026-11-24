@@ -465,6 +465,7 @@ async function loadFiles(files, { mode = "replace", camera = false } = {}) {
 
   fresh.forEach((p) => (p.isNew = true)); // hiệu ứng nổi bật trang mới
   setHidden($("page-grid-section"), false);
+  setHidden($("upload-actions"), true); // đã có tài liệu: dùng nút trong lưới trang
   renderPageGrid();
   fresh.forEach((p) => delete p.isNew);
   $("page-grid")?.lastElementChild?.scrollIntoView({
@@ -645,6 +646,7 @@ function clearPages() {
   });
   renderPageGrid();
   setHidden($("page-grid-section"), true);
+  setHidden($("upload-actions"), false);
 }
 
 function openPreview(canvas) {
@@ -805,6 +807,16 @@ function buildQuestions(data, format, pages, allowPageFallback = true) {
         }));
       } else {
         type = "short";
+      }
+    }
+    // Câu đúng/sai mà AI không đọc được ít nhất 2 ý thì không làm được: bỏ qua thay vì tạo ra câu hỏng
+    if (type === "tf") {
+      const filled = normalizeStatements(q.statements).filter(
+        (st) => st.text,
+      ).length;
+      if (filled < 2) {
+        console.warn("[extract] Bỏ câu đúng/sai thiếu ý:", text.slice(0, 80));
+        return;
       }
     }
     // Định dạng "Trắc nghiệm ngắn" chỉ nhận câu có lựa chọn
@@ -1181,7 +1193,7 @@ function maxScore(q) {
   if (q.type === "mcq") return 0.25;
   if (q.type === "tf") return 1;
   // Đề THPT: câu trả lời ngắn môn Toán 0.5đ, các môn khác 0.25đ
-  return /toán/i.test(state.current.subject || "") ? 0.5 : 0.25;
+  return 0.5; // THPT: Phần III gồm 6 câu trả lời ngắn, mỗi câu 0,5 điểm (12×0,25 + 4×1 + 6×0,5 = 10)
 }
 
 function gradeQuestion(q, ans) {
@@ -1215,19 +1227,29 @@ function totals() {
   const exam = state.current;
   let earned = 0;
   let max = 0;
+  let keyed = 0; // số câu có đáp án chuẩn
+  let graded = 0; // số câu đã chấm (đã trả lời)
   exam.questions.forEach((q, i) => {
     const g = gradeQuestion(q, exam.answers[i]);
-    if (g.status === "nokey") return; // câu chưa có đáp án thì không tính vào thang điểm
+    if (g.status === "nokey") return; // câu chưa có đáp án không tính vào thang điểm
+    keyed++;
     max += g.max;
-    if (exam.checked[i]) earned += g.earned;
+    if (exam.checked[i]) {
+      earned += g.earned;
+      graded++;
+    }
   });
-  return { earned, max };
+  return { earned, max, keyed, graded };
 }
 
 function updateTotal() {
-  const { earned, max } = totals();
+  const { earned, max, keyed, graded } = totals();
   const score = max ? (earned / max) * 10 : 0;
-  $("total-score").textContent = `${score.toFixed(2)} / 10`;
+  const total = state.current.questions.length;
+  let text = `${score.toFixed(2)} / 10`;
+  if (graded < keyed) text += ` · đã chấm ${graded}/${keyed} câu`;
+  if (keyed < total) text += ` · ${total - keyed} câu chưa có đáp án`;
+  $("total-score").textContent = text;
 }
 
 /* ============ Hiển thị đề ============ */
@@ -1743,7 +1765,7 @@ function renderExplainPanel() {
   else {
     setPlain(
       essay,
-      'Bấm "Giải chi tiết từng bước" để AI trình bày lời giải tự luận.',
+      'Bấm tab "Chi tiết từng bước" để AI trình bày lời giải từng bước.',
     );
   }
   setHidden($("quick-warning"), true);
@@ -2176,11 +2198,11 @@ function maybeAutoExplain(exam, i) {
 
 function quickHint(exam, i) {
   if (!exam.checked[i]) {
-    return 'Chọn đáp án. Nếu làm sai, AI sẽ tự hiện cách giải nhanh; muốn xem lời giải đầy đủ thì bấm "Giải chi tiết từng bước".';
+    return 'Chọn đáp án. Nếu làm sai, AI sẽ tự hiện cách giải nhanh; muốn xem lời giải đầy đủ thì bấm tab "Chi tiết từng bước".';
   }
   const g = gradeQuestion(exam.questions[i], exam.answers[i]);
   if (g.status === "correct") {
-    return '✅ Bạn làm đúng rồi! Muốn xem cách làm nhanh thì bấm tab giải nhanh ở trên, hoặc "Giải chi tiết từng bước".';
+    return '✅ Bạn làm đúng rồi! Muốn xem cách làm nhanh thì bấm tab giải nhanh ở trên, hoặc tab "Chi tiết từng bước".';
   }
   if (g.status === "nokey") {
     return "Câu này chưa có đáp án chuẩn. Bấm tab giải nhanh ở trên để AI hướng dẫn cách làm.";
@@ -2833,24 +2855,78 @@ async function submitExam(opts = {}) {
   }
 }
 
-function encodeShare(obj) {
-  const bytes = new TextEncoder().encode(JSON.stringify(obj));
+/* ============ Chia sẻ đề bằng liên kết (nén để link ngắn) ============ */
+
+// Nén bằng deflate-raw rồi mã hóa base64url (an toàn trong #). Trình duyệt cũ không có CompressionStream thì dùng cách thường.
+function bytesToB64Url(bytes) {
   let bin = "";
-  bytes.forEach((b) => (bin += String.fromCharCode(b)));
-  return btoa(bin);
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function b64UrlToBytes(str) {
+  const b64 = str.replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+}
+
+async function streamBytes(bytes, transform) {
+  const out = new Blob([bytes]).stream().pipeThrough(transform);
+  return new Uint8Array(await new Response(out).arrayBuffer());
+}
+
+// Rút gọn từng câu: bỏ ảnh, khóa tên dài, chỉ giữ thông tin cần để hiển thị và chấm
+function slimQuestion(q) {
+  const o = { t: q.type, x: q.text };
+  if (Array.isArray(q.options) && q.options.length) {
+    o.o = q.options.map((op) => [op.label, op.text]);
+  }
+  if (Array.isArray(q.statements) && q.statements.length) {
+    o.s = q.statements.map((st) => [st.label, st.text]);
+  }
+  if (q.key !== null && q.key !== undefined) o.k = q.key;
+  if (q.difficulty) o.d = q.difficulty;
+  return o;
+}
+
+function expandQuestion(s) {
+  const type = s.t;
+  return {
+    type,
+    text: s.x || "",
+    options:
+      type === "mcq" && s.o
+        ? s.o.map(([label, text]) => ({ label, text }))
+        : null,
+    statements:
+      type === "tf" && s.s
+        ? s.s.map(([label, text]) => ({ label, text }))
+        : null,
+    key: s.k === undefined ? null : s.k,
+    solved: false,
+    figure: null,
+    figureImage: null,
+    figureIsPage: false,
+    difficulty: s.d || 2,
+  };
 }
 
 async function shareExam() {
   const exam = state.current;
   if (!exam) return;
   const payload = {
-    v: 1,
+    v: 2,
     title: exam.title,
     subject: exam.subject,
     format: exam.format,
-    questions: exam.questions.map(({ figureImage, ...rest }) => rest),
+    questions: exam.questions.map(slimQuestion),
   };
-  const url = `${location.origin}${location.pathname}#de=${encodeShare(payload)}`;
+  const raw = new TextEncoder().encode(JSON.stringify(payload));
+  const hash =
+    typeof CompressionStream === "function"
+      ? `#dz=${bytesToB64Url(await streamBytes(raw, new CompressionStream("deflate-raw")))}`
+      : `#de=${bytesToB64Url(raw)}`;
+  const url = `${location.origin}${location.pathname}${hash}`;
   if (url.length > 60000) {
     toast("Đề quá lớn để chia sẻ bằng liên kết. Hãy giảm số câu.", "warn");
     return;
@@ -2866,23 +2942,28 @@ async function shareExam() {
   }
 }
 
-function openSharedFromHash() {
-  const m = location.hash.match(/^#de=(.+)$/);
+async function openSharedFromHash() {
+  const m = location.hash.match(/^#(de|dz)=(.+)$/);
   if (!m) return false;
   try {
-    const bin = atob(m[1]);
-    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    let bytes = b64UrlToBytes(m[2]);
+    if (m[1] === "dz") {
+      bytes = await streamBytes(bytes, new DecompressionStream("deflate-raw"));
+    }
     const payload = JSON.parse(new TextDecoder().decode(bytes));
     if (!Array.isArray(payload.questions)) throw new Error("sai định dạng");
+    const questions = payload.questions.map(
+      (q) => (q.t !== undefined ? expandQuestion(q) : q), // link cũ (chưa rút gọn) vẫn mở được
+    );
     openExam({
       id: makeId(),
       title: payload.title || "Đề chia sẻ",
       subject: payload.subject || "",
       format: payload.format || "thpt",
       createdAt: Date.now(),
-      questions: payload.questions,
-      answers: payload.questions.map(initialAnswer),
-      checked: payload.questions.map(() => false),
+      questions,
+      answers: questions.map(initialAnswer),
+      checked: questions.map(() => false),
     });
     history.replaceState(null, "", location.pathname);
     return true;
@@ -2994,8 +3075,10 @@ function init() {
   window.addEventListener("resize", syncLayoutVars);
   syncLayoutVars();
 
-  on("explain-current-btn", "click", explainCurrent);
-  on("tab-essay", "click", () => setTab("essay"));
+  on("tab-essay", "click", () => {
+    setTab("essay", false);
+    if (!state.explain[state.idx]) explainCurrent();
+  });
   on("tab-quick", "click", () => setTab("quick"));
   on("chat-form", "submit", sendChat);
   on("short-answer-input", "change", onShortChange);
