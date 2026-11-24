@@ -1596,3 +1596,48 @@ body[data-layout="mobile"] .toast {
     text-align: center;
   }
 }
+/* Chống tràn ngang trên điện thoại */
+.pane,
+.explanation-panel,
+.explanation-body,
+.tab-content,
+.chat-panel,
+.chat-messages,
+.question-content,
+.md {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Chữ dài (kể cả không có khoảng trắng) tự xuống dòng thay vì đẩy khung ra ngoài */
+.explanation-body,
+.tab-content,
+.md,
+.chat-messages {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Công thức đứng riêng dòng: nếu quá rộng thì cuộn ngang trong chính khung đó */
+mjx-container[display="true"] {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+
+/* Công thức nằm trong dòng chữ: để xuống dòng bình thường */
+mjx-container[display="false"] {
+  max-width: 100%;
+}
+
+mjx-container svg {
+  max-width: 100%;
+}
+
+/* Bong bóng chat không được rộng hơn khung */
+.chat-messages > * {
+  max-width: 100%;
+}

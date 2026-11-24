@@ -74,7 +74,7 @@
       <section id="home-view" class="view-section active">
         <div class="setup-container">
           <div class="upload-box">
-            <div class="upload-actions">
+            <div class="upload-actions" id="upload-actions">
               <label
                 for="file-input"
                 class="btn btn-outline"
@@ -89,20 +89,13 @@
                   hidden
                 />
               </label>
-              <label
-                for="add-input"
-                class="btn btn-outline"
-                title="Thêm vào tài liệu đang dùng, không xóa trang cũ"
-              >
-                ➕ Thêm ảnh / file
-                <input
-                  type="file"
-                  id="add-input"
-                  accept="application/pdf,image/*"
-                  multiple
-                  hidden
-                />
-              </label>
+              <input
+                type="file"
+                id="add-input"
+                accept="application/pdf,image/*"
+                multiple
+                hidden
+              />
               <label
                 for="camera-input"
                 class="btn btn-outline"
