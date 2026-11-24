@@ -75,8 +75,12 @@
         <div class="setup-container">
           <div class="upload-box">
             <div class="upload-actions">
-              <label for="file-input" class="btn btn-outline">
-                Chọn PDF hoặc Ảnh
+              <label
+                for="file-input"
+                class="btn btn-outline"
+                title="Tài liệu mới: thay các trang đang có"
+              >
+                📄 Chọn PDF hoặc Ảnh
                 <input
                   type="file"
                   id="file-input"
@@ -85,8 +89,26 @@
                   hidden
                 />
               </label>
-              <label for="camera-input" class="btn btn-outline">
-                Chụp ảnh đề
+              <label
+                for="add-input"
+                class="btn btn-outline"
+                title="Thêm vào tài liệu đang dùng, không xóa trang cũ"
+              >
+                ➕ Thêm ảnh / file
+                <input
+                  type="file"
+                  id="add-input"
+                  accept="application/pdf,image/*"
+                  multiple
+                  hidden
+                />
+              </label>
+              <label
+                for="camera-input"
+                class="btn btn-outline"
+                title="Chụp thêm một trang vào tài liệu đang dùng"
+              >
+                📷 Chụp ảnh đề
                 <input
                   type="file"
                   id="camera-input"
@@ -96,6 +118,7 @@
                 />
               </label>
             </div>
+            <p id="upload-hint" class="upload-hint"></p>
             <div class="paste-box">
               <label for="text-input" class="field-label"
                 >Hoặc dán nội dung văn bản đề / bài tập:</label
@@ -244,6 +267,12 @@
           <div class="page-grid-header">
             <h2 class="section-title">Chọn các trang cần xử lý</h2>
             <div class="page-grid-controls">
+              <button type="button" id="grid-add-btn" class="btn btn-sm">
+                ➕ Thêm file
+              </button>
+              <button type="button" id="grid-camera-btn" class="btn btn-sm">
+                📷 Chụp thêm
+              </button>
               <button
                 type="button"
                 id="select-all-pages-btn"

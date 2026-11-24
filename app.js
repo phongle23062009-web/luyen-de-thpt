@@ -388,7 +388,7 @@ async function addPdfPages(file) {
   return count;
 }
 
-async function addImagePage(file) {
+async function addImagePage(file, { source, camera } = {}) {
   const img = await loadImageFile(file);
   const scale = Math.min(
     1,
@@ -396,29 +396,36 @@ async function addImagePage(file) {
   );
   const canvas = newCanvas(img.naturalWidth * scale, img.naturalHeight * scale);
   canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-  state.pages.push({ canvas, selected: false, source: file.name });
+  state.pages.push({
+    canvas,
+    selected: false,
+    source: source || file.name,
+    camera: !!camera,
+  });
 }
 
-// replace = true: tài liệu mới thay hẳn các trang của tài liệu cũ (tránh nhầm trang cũ với đề mới).
-// Chụp ảnh nhiều trang (camera) thì thêm vào để ghép thành một tài liệu.
-async function loadFiles(files, { replace = false } = {}) {
+// mode "replace": tài liệu mới thay hẳn các trang cũ (tránh nhầm trang cũ với đề mới).
+// mode "append": ghép thêm vào cuối tài liệu đang dùng (ảnh chụp từng trang, thêm file bổ sung).
+async function loadFiles(files, { mode = "replace", camera = false } = {}) {
   if (!files.length) return;
-  setLoading(true, "Đang đọc tài liệu...");
-  let added = 0;
+  const replace = mode === "replace";
+  setLoading(true, replace ? "Đang đọc tài liệu..." : "Đang thêm trang...");
   const oldPages = state.pages;
   if (replace) state.pages = [];
+  const before = state.pages.length;
+  let added = 0;
   try {
     for (const file of files) {
-      if (state.pages.length >= MAX_PAGES) {
-        toast(`Tối đa ${MAX_PAGES} trang, phần còn lại đã bỏ qua.`, "warn");
-        break;
-      }
+      if (state.pages.length >= MAX_PAGES) break;
       const isPdf =
         file.type === "application/pdf" || /\.pdf$/i.test(file.name);
       if (isPdf) {
         added += await addPdfPages(file);
       } else if (file.type.startsWith("image/")) {
-        await addImagePage(file);
+        await addImagePage(
+          file,
+          camera ? { source: "Ảnh chụp", camera: true } : {},
+        );
         added++;
       } else {
         toast(`Không hỗ trợ file: ${file.name}`, "warn");
@@ -431,25 +438,90 @@ async function loadFiles(files, { replace = false } = {}) {
   }
 
   if (!added && replace) state.pages = oldPages; // không đọc được file mới thì giữ lại tài liệu cũ
-  if (added) {
+  if (!added) return;
+
+  const fresh = state.pages.slice(before);
+  if (replace) {
     if (!state.pages.some((p) => p.selected)) {
       state.pages.slice(0, 3).forEach((p) => (p.selected = true));
     }
-    setHidden($("page-grid-section"), false);
-    renderPageGrid();
-    if (replace && oldPages.length) {
-      const names = [...new Set(files.map((f) => f.name))].join(", ");
-      toast(`Đã thay tài liệu cũ bằng: ${names} (${added} trang).`, "info");
+  } else {
+    // Trang vừa thêm được chọn sẵn (tối đa MAX_SEND trang mỗi lần xử lý)
+    let room = Math.max(0, MAX_SEND - selectedCount());
+    let skipped = 0;
+    fresh.forEach((p) => {
+      if (room > 0) {
+        p.selected = true;
+        room--;
+      } else skipped++;
+    });
+    if (skipped) {
+      toast(
+        `Mỗi lần chỉ xử lý tối đa ${MAX_SEND} trang nên ${skipped} trang mới chưa được chọn.`,
+        "warn",
+      );
     }
+  }
+
+  fresh.forEach((p) => (p.isNew = true)); // hiệu ứng nổi bật trang mới
+  setHidden($("page-grid-section"), false);
+  renderPageGrid();
+  fresh.forEach((p) => delete p.isNew);
+  $("page-grid")?.lastElementChild?.scrollIntoView({
+    block: "nearest",
+    behavior: "smooth",
+  });
+
+  if (replace && oldPages.length) {
+    const names = [...new Set(files.map((f) => f.name))].join(", ");
+    toast(`Đã thay tài liệu cũ bằng: ${names} (${added} trang).`, "info");
+  } else if (!replace) {
+    toast(
+      `Đã thêm ${added} trang vào tài liệu (tổng ${state.pages.length} trang).` +
+        (camera ? " Bấm “Chụp thêm” để chụp trang tiếp theo." : ""),
+      "info",
+    );
+  }
+  if (state.pages.length >= MAX_PAGES) {
+    toast(
+      `Đã đủ ${MAX_PAGES} trang (tối đa). Hãy xóa bớt trang nếu muốn thêm.`,
+      "warn",
+    );
   }
 }
 
 async function onFilesChosen(e) {
   const input = e.target;
   const files = Array.from(input.files || []);
-  const append = input.id === "camera-input";
+  const id = input.id;
   input.value = "";
-  await loadFiles(files, { replace: !append });
+  await loadFiles(files, {
+    mode: id === "file-input" ? "replace" : "append",
+    camera: id === "camera-input",
+  });
+}
+
+function movePage(i, delta) {
+  const j = i + delta;
+  if (j < 0 || j >= state.pages.length) return;
+  [state.pages[i], state.pages[j]] = [state.pages[j], state.pages[i]];
+  renderPageGrid();
+}
+
+function removePage(i) {
+  state.pages.splice(i, 1);
+  if (!state.pages.length) clearPages();
+  else renderPageGrid();
+}
+
+// Gợi ý ngắn: phân biệt "thay tài liệu" và "thêm vào tài liệu"
+function renderUploadHint() {
+  const el = $("upload-hint");
+  if (!el) return;
+  const n = state.pages.length;
+  el.textContent = n
+    ? `Đang có ${n} trang. “Thêm ảnh / file” và “Chụp ảnh đề” ghép thêm vào cuối tài liệu này; “Chọn PDF hoặc Ảnh” sẽ thay bằng tài liệu mới.`
+    : "Chọn PDF hoặc Ảnh để bắt đầu. Đề chụp nhiều trang? Chụp từng trang bằng “Chụp ảnh đề” hoặc ghép bằng “Thêm ảnh / file”.";
 }
 
 // Dòng ghi rõ đang dùng tài liệu nào, để không nhầm với tài liệu cũ
@@ -475,7 +547,10 @@ function renderPageGrid() {
   grid.replaceChildren();
   state.pages.forEach((page, i) => {
     const tile = document.createElement("div");
-    tile.className = "page-tile" + (page.selected ? " selected" : "");
+    tile.className =
+      "page-tile" +
+      (page.selected ? " selected" : "") +
+      (page.isNew ? " is-new" : "");
 
     const thumb = document.createElement("canvas");
     const h = 180;
@@ -485,7 +560,7 @@ function renderPageGrid() {
 
     const label = document.createElement("span");
     label.className = "page-label";
-    label.textContent = `Trang ${i + 1}`;
+    label.textContent = `Trang ${i + 1}${page.camera ? " 📷" : ""}`;
 
     const view = document.createElement("button");
     view.type = "button";
@@ -496,11 +571,40 @@ function renderPageGrid() {
       openPreview(page.canvas);
     });
 
-    tile.append(thumb, label, view);
+    const tools = document.createElement("div");
+    tools.className = "page-tools";
+    const tool = (text, title, fn, extra = "", disabled = false) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "page-tool " + extra;
+      b.textContent = text;
+      b.title = title;
+      b.setAttribute("aria-label", `${title} (trang ${i + 1})`);
+      b.disabled = disabled;
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        fn();
+      });
+      return b;
+    };
+    tools.append(
+      tool("◀", "Đưa lên trước", () => movePage(i, -1), "", i === 0),
+      tool(
+        "▶",
+        "Đưa ra sau",
+        () => movePage(i, 1),
+        "",
+        i === state.pages.length - 1,
+      ),
+      tool("✕", "Xóa trang này", () => removePage(i), "danger"),
+    );
+
+    tile.append(thumb, label, view, tools);
     tile.addEventListener("click", () => togglePage(i));
     grid.appendChild(tile);
   });
   renderPageNote();
+  renderUploadHint();
 }
 
 function selectedCount() {
@@ -535,7 +639,7 @@ function deselectAllPages() {
 
 function clearPages() {
   state.pages = [];
-  ["file-input", "camera-input"].forEach((id) => {
+  ["file-input", "add-input", "camera-input"].forEach((id) => {
     const el = $(id);
     if (el) el.value = "";
   });
@@ -2836,7 +2940,11 @@ function init() {
     goHome();
   });
   on("file-input", "change", onFilesChosen);
+  on("add-input", "change", onFilesChosen);
   on("camera-input", "change", onFilesChosen);
+  on("grid-add-btn", "click", () => $("add-input")?.click());
+  on("grid-camera-btn", "click", () => $("camera-input")?.click());
+  renderUploadHint();
   on("select-all-pages-btn", "click", selectAllPages);
   on("deselect-all-pages-btn", "click", deselectAllPages);
   on("clear-files-btn", "click", clearPages);
